@@ -24,8 +24,8 @@ pub enum CoreError {
 mod tests {
     use crate::harness::ProjectHarness;
     use crate::ocr::{
-        ChunkGranularity, FormattedOcrSegment, LayoutBlockKind, OcrFormattingHarness,
-        OcrPipelineConfig, ScannedPdfSuite,
+        ChunkGranularity, DocumentIngestionMode, FormattedOcrSegment, LayoutBlockKind,
+        OcrFormattingHarness, OcrPipelineConfig, ScannedPdfSuite, UniversalDocumentIngestor,
     };
     use crate::project::AmanuensisWorkspace;
     use crate::tm::{TmBank, TmMatchType, TranslationMemoryEngine};
@@ -483,5 +483,72 @@ CHAPTER II: DIALOGUES AND METRICS
         assert!(contents.contains("OCR_FORMAT_HARNESS.md"));
         assert!(contents.contains("Invariância Lexical Absoluta"));
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_universal_document_ingestor_docx_clipboard_native_pdf_and_srt() {
+        // 1. Word .docx XML extraction + contextual segmentation
+        let sample_docx_xml = r#"
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+            <w:p>
+              <w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+              <w:r><w:t>Manifiesto de los Traductores Literarios</w:t></w:r>
+            </w:p>
+            <w:p>
+              <w:r><w:t>La traducción literaria exige preservar el ritmo, la respiración y la precisión histórica de cada párrafo. No basta con sustituir palabras aisladas sin comprender el contexto cultural de 1968.</w:t></w:r>
+            </w:p>
+          </w:body>
+        </w:document>
+        "#;
+        let docx_res = UniversalDocumentIngestor::ingest_and_format(
+            "manifiesto_editorial.docx",
+            sample_docx_xml,
+            false,
+            ChunkGranularity::ContextualShort,
+        );
+        assert_eq!(docx_res.mode, DocumentIngestionMode::WordDocx);
+        assert!(docx_res.formatting.audit.passed);
+        assert_eq!(docx_res.formatting.segments[0].kind, LayoutBlockKind::Heading);
+        assert!(docx_res.formatting.segments[0]
+            .markdown_text
+            .contains("# Manifiesto de los Traductores Literarios"));
+
+        // 2. Direct Clipboard Paste (`clipboard://`)
+        let pasted_text = "Discurso copiado da web.\n\nA liberdade de imprensa e o rigor da tradução jornalística caminham juntos nas democracias contemporâneas. Cada citação deve manter sua integridade.";
+        let clip_res = UniversalDocumentIngestor::ingest_and_format(
+            "clipboard://trecho_colado",
+            pasted_text,
+            false,
+            ChunkGranularity::ContextualShort,
+        );
+        assert_eq!(clip_res.mode, DocumentIngestionMode::ClipboardPaste);
+        assert!(clip_res.formatting.audit.passed);
+        assert!(clip_res.formatting.segments.len() >= 2);
+
+        // 3. Native Digital PDF (without optical OCR)
+        let native_pdf_text = "CAPÍTULO 1\n\nEste artigo em PDF digital já possui camada de texto nativa selecionável e foi extraído instantaneamente sem precisar de OCR óptico.";
+        let pdf_res = UniversalDocumentIngestor::ingest_and_format(
+            "artigo_academico_nativo.pdf",
+            native_pdf_text,
+            false,
+            ChunkGranularity::ContextualShort,
+        );
+        assert_eq!(pdf_res.mode, DocumentIngestionMode::NativeDigitalPdf);
+        assert!(!pdf_res.used_optical_ocr);
+        assert!(pdf_res.formatting.audit.passed);
+
+        // 4. Subtitle (.srt) ingestion
+        let srt_payload = "1\n00:00:01,200 --> 00:00:04,500\n— Compañeros de la fábrica Citroën, la asamblea comienza ahora.\n\n2\n00:00:05,000 --> 00:00:09,100\n— ¡Votemos la huelga general en todos los talleres!";
+        let srt_res = UniversalDocumentIngestor::ingest_and_format(
+            "documentario_1968.srt",
+            srt_payload,
+            false,
+            ChunkGranularity::ContextualShort,
+        );
+        assert_eq!(srt_res.mode, DocumentIngestionMode::PlainTextOrMarkdown);
+        assert!(srt_res.formatting.audit.passed);
+        assert_eq!(srt_res.formatting.segments.len(), 2);
+        assert!(!srt_res.formatting.formatted_markdown.contains("-->"));
     }
 }

@@ -1349,3 +1349,196 @@ fn base64_encode(input: &[u8]) -> String {
     }
     out
 }
+
+/// Represents how the source document or text entered Amanuensis in v1.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DocumentIngestionMode {
+    /// Scanned PDF or image requiring optical character recognition (Vision OCR / PDFKit / Tesseract).
+    ScannedPdfOcr,
+    /// Native digital PDF with an embedded selectable text layer (instant extraction, zero optical OCR lag).
+    NativeDigitalPdf,
+    /// Microsoft Word / Rich Text document (`.docx`, `.doc`, `.rtf`, `.odt`).
+    WordDocx,
+    /// Plain text, Markdown, or subtitle file (`.md`, `.txt`, `.srt`, `.csv`).
+    PlainTextOrMarkdown,
+    /// Text pasted directly from the clipboard (`Cmd+V` / `Ctrl+V`) or typed into the direct editor.
+    ClipboardPaste,
+}
+
+impl DocumentIngestionMode {
+    pub fn detect_from_filename_and_hint(filename: &str, used_optical_ocr: bool) -> Self {
+        let lower = filename.trim().to_lowercase();
+        if lower.starts_with("clipboard://") || lower == "colado_da_area_de_transferencia.txt" {
+            Self::ClipboardPaste
+        } else if lower.ends_with(".docx")
+            || lower.ends_with(".doc")
+            || lower.ends_with(".rtf")
+            || lower.ends_with(".odt")
+        {
+            Self::WordDocx
+        } else if lower.ends_with(".md")
+            || lower.ends_with(".markdown")
+            || lower.ends_with(".txt")
+            || lower.ends_with(".srt")
+            || lower.ends_with(".csv")
+        {
+            Self::PlainTextOrMarkdown
+        } else if lower.ends_with(".pdf") {
+            if used_optical_ocr {
+                Self::ScannedPdfOcr
+            } else {
+                Self::NativeDigitalPdf
+            }
+        } else {
+            Self::PlainTextOrMarkdown
+        }
+    }
+
+    pub fn label_pt(&self) -> &'static str {
+        match self {
+            Self::ScannedPdfOcr => "🔍 PDF Escaneado (OCR Óptico + Estruturação)",
+            Self::NativeDigitalPdf => "📄 PDF Digital Nativo (Camada de Texto Instantânea, Sem OCR)",
+            Self::WordDocx => "📝 Documento Word (.docx / .rtf — Extração Estruturada)",
+            Self::PlainTextOrMarkdown => "📑 Texto / Markdown / Legenda (.md, .txt, .srt)",
+            Self::ClipboardPaste => "📋 Texto Colado Direto (Área de Transferência / Cmd+V)",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestedDocumentResult {
+    pub source_name: String,
+    pub mode: DocumentIngestionMode,
+    pub mode_label: String,
+    pub used_optical_ocr: bool,
+    pub raw_extracted_text: String,
+    pub formatting: OcrFormattingResult,
+}
+
+/// Universal v1 Ingestion Pipeline supporting Scanned PDFs, Native Digital PDFs,
+/// Word `.docx` (`word/document.xml` or plain text), `.md`/`.txt`/`.srt`, and Clipboard Paste.
+pub struct UniversalDocumentIngestor;
+
+impl UniversalDocumentIngestor {
+    /// Extracts clean paragraphs and Markdown headings (`#` / `##`) from a Word `.docx` XML payload
+    /// (`word/document.xml`) or falls back to plain text if already converted.
+    pub fn extract_text_from_docx_xml_or_plain(input: &str) -> String {
+        let trimmed = input.trim();
+        if !trimmed.contains("<w:document") && !trimmed.contains("<w:p") {
+            return trimmed.to_string();
+        }
+
+        let p_re = regex::Regex::new(r"(?s)<w:p\b[^>]*>(.*?)</w:p>").unwrap();
+        let style_re = regex::Regex::new(r#"<w:pStyle\s+w:val="([^"]+)""#).unwrap();
+        let t_re = regex::Regex::new(r"(?s)<w:t(?:\s+[^>]*)?>(.*?)</w:t>").unwrap();
+
+        let mut paragraphs: Vec<String> = Vec::new();
+        for p_cap in p_re.captures_iter(trimmed) {
+            let p_inner = &p_cap[1];
+            let mut text_buf = String::new();
+            for t_cap in t_re.captures_iter(p_inner) {
+                let raw_t = t_cap[1]
+                    .replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'");
+                text_buf.push_str(&raw_t);
+            }
+            let clean_p = text_buf.trim();
+            if clean_p.is_empty() {
+                continue;
+            }
+
+            let is_h1 = style_re
+                .captures(p_inner)
+                .map(|c| {
+                    let s = c[1].to_lowercase();
+                    s.contains("heading1") || s.contains("titulo1") || s == "title"
+                })
+                .unwrap_or(false);
+            let is_h2 = style_re
+                .captures(p_inner)
+                .map(|c| {
+                    let s = c[1].to_lowercase();
+                    s.contains("heading2") || s.contains("titulo2") || s == "subtitle"
+                })
+                .unwrap_or(false);
+
+            if is_h1 && !clean_p.starts_with('#') {
+                paragraphs.push(format!("# {}", clean_p));
+            } else if is_h2 && !clean_p.starts_with('#') {
+                paragraphs.push(format!("## {}", clean_p));
+            } else {
+                paragraphs.push(clean_p.to_string());
+            }
+        }
+
+        paragraphs.join("\n\n")
+    }
+
+    /// Cleans `.srt` subtitle timestamps (`00:01:12,400 --> 00:01:15,800`) and sequence numbers
+    /// into clean contextual dialogue lines when the user imports an `.srt` file.
+    pub fn normalize_srt_if_needed(filename: &str, raw_text: &str) -> String {
+        if !filename.trim().to_lowercase().ends_with(".srt") {
+            return raw_text.to_string();
+        }
+        let ts_re = regex::Regex::new(
+            r"^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}",
+        )
+        .unwrap();
+        let seq_re = regex::Regex::new(r"^\d{1,5}$").unwrap();
+
+        let mut lines_out = Vec::new();
+        for line in raw_text.lines() {
+            let t = line.trim();
+            if t.is_empty() || seq_re.is_match(t) || ts_re.is_match(t) {
+                continue;
+            }
+            lines_out.push(t.to_string());
+        }
+        lines_out.join("\n\n")
+    }
+
+    /// Universal entry point that accepts any document source (Clipboard, Word `.docx`, Native Digital PDF,
+    /// Scanned PDF OCR, or `.md`/`.txt`/`.srt`) and structures it via `OcrFormattingHarness`.
+    pub fn ingest_and_format(
+        source_name: &str,
+        raw_payload: &str,
+        used_optical_ocr: bool,
+        granularity: ChunkGranularity,
+    ) -> IngestedDocumentResult {
+        let mode =
+            DocumentIngestionMode::detect_from_filename_and_hint(source_name, used_optical_ocr);
+        let normalized_payload = match mode {
+            DocumentIngestionMode::WordDocx => Self::extract_text_from_docx_xml_or_plain(raw_payload),
+            DocumentIngestionMode::PlainTextOrMarkdown => {
+                Self::normalize_srt_if_needed(source_name, raw_payload)
+            }
+            _ => raw_payload.to_string(),
+        };
+
+        let harness = OcrFormattingHarness {
+            granularity,
+            dehyphenate_line_breaks: matches!(
+                mode,
+                DocumentIngestionMode::ScannedPdfOcr | DocumentIngestionMode::NativeDigitalPdf
+            ),
+            strip_running_page_numbers: matches!(
+                mode,
+                DocumentIngestionMode::ScannedPdfOcr | DocumentIngestionMode::NativeDigitalPdf
+            ),
+            ..OcrFormattingHarness::default()
+        };
+
+        let formatting = harness.format_and_segment(&normalized_payload);
+        IngestedDocumentResult {
+            source_name: source_name.to_string(),
+            mode,
+            mode_label: mode.label_pt().to_string(),
+            used_optical_ocr,
+            raw_extracted_text: normalized_payload,
+            formatting,
+        }
+    }
+}

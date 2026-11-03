@@ -117,6 +117,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
 
         if cmd == "pickFile" {
             presentNativeOpenPanel()
+        } else if cmd == "pasteClipboard" {
+            let pbText = NSPasteboard.general.string(forType: .string) ?? ""
+            let donePayload: [String: Any] = [
+                "status": "done",
+                "filename": "clipboard://Texto_Colado_da_Area_de_Transferencia.txt",
+                "path": "clipboard://",
+                "pageCount": 1,
+                "scannedUpToPage": 1,
+                "hasMorePages": false,
+                "usedVisionOcr": false,
+                "ingestionMode": "ClipboardPaste",
+                "content": pbText
+            ]
+            sendNativeFilePayload(donePayload)
         } else if cmd == "stopOcr" {
             cancelOcrRequested = true
         } else if cmd == "scanMorePages" {
@@ -134,8 +148,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         completionHandler: @escaping ([URL]?) -> Void
     ) {
         let panel = NSOpenPanel()
-        panel.title = "Escolher PDF Escaneado ou Documento para Tradução"
-        panel.message = "Selecione um arquivo PDF escaneado (.pdf), Markdown (.md), Texto (.txt) ou Memória (.tmx, .csv)"
+        panel.title = "Escolher Documento para Tradução (PDF Digital/Escaneado, Word .docx, .md, .txt, .srt)"
+        panel.message = "Selecione um PDF (digital ou escaneado), Documento Word (.docx, .rtf, .odt), Markdown (.md), Texto (.txt) ou Legenda (.srt)"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
@@ -151,8 +165,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
 
     @objc func presentNativeOpenPanel() {
         let panel = NSOpenPanel()
-        panel.title = "Escolher PDF Escaneado ou Documento"
-        panel.message = "Selecione um PDF escaneado (.pdf) para extrair via OCR (PDFKit + Apple Vision) ou um arquivo .md / .txt"
+        panel.title = "Escolher Documento para Tradução (PDF, Word .docx, .md, .txt, .srt)"
+        panel.message = "Selecione um PDF Digital, PDF Escaneado, Word (.docx, .doc, .rtf, .odt), Markdown (.md), Texto (.txt) ou Legenda (.srt)"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -161,6 +175,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
                 self?.processSelectedOrDroppedFile(url: url, startPage: 0, batchSize: 10)
             }
         }
+    }
+
+    private func extractWordOrRichText(url: URL) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/textutil")
+        proc.arguments = ["-convert", "txt", "-stdout", url.path]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            if proc.terminationStatus == 0, let str = String(data: data, encoding: .utf8), !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return str
+            }
+        } catch {}
+        return nil
     }
 
     func processSelectedOrDroppedFile(url: URL, startPage: Int, batchSize: Int) {
@@ -251,6 +283,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
                 if extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     extractedText = "# \(filename)\n\nDocumento PDF (\(pageCount) página(s)) carregado para processamento OCR e tradução."
                 }
+            } else if ["docx", "doc", "rtf", "odt"].contains(ext), let wordText = self.extractWordOrRichText(url: url) {
+                extractedText = wordText
+                actualScannedUpTo = 1
             } else if let text = try? String(contentsOf: url, encoding: .utf8) {
                 extractedText = text
                 actualScannedUpTo = 1
@@ -262,6 +297,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
                 actualScannedUpTo = 1
             }
 
+            let modeHint: String
+            if ext == "pdf" {
+                modeHint = usedVisionOcr ? "ScannedPdfOcr" : "NativeDigitalPdf"
+            } else if ["docx", "doc", "rtf", "odt"].contains(ext) {
+                modeHint = "WordDocx"
+            } else {
+                modeHint = "PlainTextOrMarkdown"
+            }
+
             DispatchQueue.main.async {
                 let donePayload: [String: Any] = [
                     "status": "done",
@@ -271,6 +315,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
                     "scannedUpToPage": actualScannedUpTo,
                     "hasMorePages": actualScannedUpTo < pageCount,
                     "usedVisionOcr": usedVisionOcr,
+                    "ingestionMode": modeHint,
                     "content": extractedText
                 ]
                 self.sendNativeFilePayload(donePayload)
@@ -397,8 +442,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         let fileMenuItem = NSMenuItem()
         mainMenu.addItem(fileMenuItem)
         let fileMenu = NSMenu(title: "Arquivo")
-        fileMenu.addItem(makeActionItem(title: "Novo Projeto a partir de PDF Escaneado…", actionId: "open-onboarding-step1", key: "n"))
-        fileMenu.addItem(makeActionItem(title: "Importar PDF Escaneado ou Documento…", actionId: "trigger-pdf-upload", key: "o"))
+        fileMenu.addItem(makeActionItem(title: "Nova Entrada / Escolher Fonte de Texto…", actionId: "open-onboarding-step1", key: "n"))
+        fileMenu.addItem(makeActionItem(title: "Abrir Documento (PDF Digital/Scan, Word .docx, .md, .txt, .srt)…", actionId: "trigger-pdf-upload", key: "o"))
+        fileMenu.addItem(makeActionItem(title: "📋 Colar Texto da Área de Transferência para Traduzir…", actionId: "paste-clipboard-source", key: "V"))
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(makeActionItem(title: "Exportar Tradução em Markdown (.md)", actionId: "export-markdown", key: "e"))
         fileMenu.addItem(makeActionItem(title: "Baixar PDF Pesquisável (.pdf)", actionId: "export-searchable-pdf", key: "P"))

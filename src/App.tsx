@@ -931,6 +931,118 @@ export function splitIntoLogicalSegments(
   );
 }
 
+export type IngestionModeKind =
+  | 'ScannedPdfOcr'
+  | 'NativeDigitalPdf'
+  | 'WordDocx'
+  | 'PlainTextOrMarkdown'
+  | 'ClipboardPaste';
+
+export function getIngestionModeLabel(mode: IngestionModeKind): string {
+  switch (mode) {
+    case 'ScannedPdfOcr':
+      return '🔍 PDF Escaneado (Apple Vision OCR + PDFKit)';
+    case 'NativeDigitalPdf':
+      return '📄 PDF Digital Nativo (Camada de Texto Instantânea, Sem OCR)';
+    case 'WordDocx':
+      return '📝 Documento Word / Rich Text (.docx / .rtf)';
+    case 'PlainTextOrMarkdown':
+      return '📑 Texto / Markdown / Legenda (.md, .txt, .srt)';
+    case 'ClipboardPaste':
+      return '📋 Texto Colado Direto (Área de Transferência / Cmd+V)';
+  }
+}
+
+export function extractWordXmlToMarkdown(xml: string): string {
+  if (!xml.includes('<w:p') && !xml.includes('<w:document')) {
+    return xml.trim();
+  }
+  const paragraphs: string[] = [];
+  const pRegex = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g;
+  let pMatch: RegExpExecArray | null;
+  while ((pMatch = pRegex.exec(xml)) !== null) {
+    const pInner = pMatch[1];
+    const tRegex = /<w:t(?:\s+[^>]*)?>([\s\S]*?)<\/w:t>/g;
+    let tMatch: RegExpExecArray | null;
+    let buf = '';
+    while ((tMatch = tRegex.exec(pInner)) !== null) {
+      buf += tMatch[1]
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'");
+    }
+    const clean = buf.trim();
+    if (!clean) continue;
+    const styleMatch = /<w:pStyle\s+w:val="([^"]+)"/i.exec(pInner);
+    const styleVal = (styleMatch?.[1] || '').toLowerCase();
+    if ((styleVal.includes('heading1') || styleVal.includes('titulo1') || styleVal === 'title') && !clean.startsWith('#')) {
+      paragraphs.push(`# ${clean}`);
+    } else if ((styleVal.includes('heading2') || styleVal.includes('titulo2') || styleVal === 'subtitle') && !clean.startsWith('#')) {
+      paragraphs.push(`## ${clean}`);
+    } else {
+      paragraphs.push(clean);
+    }
+  }
+  return paragraphs.join('\n\n');
+}
+
+export async function extractDocxArrayBufferToMarkdown(buffer: ArrayBuffer): Promise<string> {
+  try {
+    const bytes = new Uint8Array(buffer);
+    const view = new DataView(buffer);
+    let offset = 0;
+    const decoder = new TextDecoder('utf-8');
+    while (offset + 30 <= bytes.length) {
+      const sig = view.getUint32(offset, true);
+      if (sig !== 0x04034b50) break;
+      const compression = view.getUint16(offset + 8, true);
+      const compressedSize = view.getUint32(offset + 18, true);
+      const fileNameLen = view.getUint16(offset + 26, true);
+      const extraLen = view.getUint16(offset + 28, true);
+      const nameBytes = bytes.subarray(offset + 30, offset + 30 + fileNameLen);
+      const entryName = decoder.decode(nameBytes);
+      const dataStart = offset + 30 + fileNameLen + extraLen;
+      const dataEnd = dataStart + compressedSize;
+      if (entryName === 'word/document.xml' && dataEnd <= bytes.length) {
+        const rawSlice = bytes.subarray(dataStart, dataEnd);
+        if (compression === 0) {
+          return extractWordXmlToMarkdown(decoder.decode(rawSlice));
+        }
+        if (compression === 8 && typeof DecompressionStream !== 'undefined') {
+          const ds = new DecompressionStream('deflate-raw');
+          const writer = ds.writable.getWriter();
+          writer.write(rawSlice);
+          writer.close();
+          const decompressedBuf = await new Response(ds.readable).arrayBuffer();
+          return extractWordXmlToMarkdown(decoder.decode(new Uint8Array(decompressedBuf)));
+        }
+      }
+      offset = dataEnd;
+    }
+  } catch {
+    // Fallback to plain decoding below
+  }
+  return '';
+}
+
+export function normalizeSrtOrPlainText(filename: string, rawText: string): string {
+  if (!filename.toLowerCase().endsWith('.srt')) {
+    return rawText;
+  }
+  return rawText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(
+      (l) =>
+        l.length > 0 &&
+        !/^\d{1,5}$/.test(l) &&
+        !/^\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/.test(l)
+    )
+    .join('\n\n');
+}
+
 function detectSourceLanguage(text: string): string {
   const sample = ` ${text.slice(0, 2000).toLowerCase()} `;
   const esHits = (
@@ -1843,6 +1955,13 @@ export function App() {
   );
   const [showOcrHarnessEditor, setShowOcrHarnessEditor] = useState<boolean>(false);
 
+  // Universal v1 Document & Text Ingestion State (Non-OCR & OCR workflows)
+  const [ingestionPortalMode, setIngestionPortalMode] = useState<'files' | 'clipboard' | 'samples'>(
+    'files'
+  );
+  const [activeIngestionMode, setActiveIngestionMode] =
+    useState<IngestionModeKind>('ScannedPdfOcr');
+
   // Modo Zen (Creative Low-Stimulus Deep-Focus Mode)
   const [zenMode, setZenMode] = useState<boolean>(false);
   const [zenAtmosphere, setZenAtmosphere] = useState<'sepia' | 'eink' | 'sage'>('sepia');
@@ -2393,14 +2512,74 @@ export function App() {
     []
   );
 
+  const triggerPasteClipboard = useCallback(async () => {
+    setIngestionPortalMode('clipboard');
+    setOnboardingStep(1);
+    setShowOnboarding(true);
+    const wk = (
+      window as unknown as {
+        webkit?: { messageHandlers?: { amanuensisNative?: { postMessage: (msg: string) => void } } };
+      }
+    ).webkit;
+    if (wk?.messageHandlers?.amanuensisNative) {
+      wk.messageHandlers.amanuensisNative.postMessage('pasteClipboard');
+      return;
+    }
+    try {
+      if (navigator.clipboard?.readText) {
+        const clip = await navigator.clipboard.readText();
+        if (clip && clip.trim().length > 0) {
+          setUploadedPdfName('clipboard://Texto_Colado.txt');
+          setSelectedSamplePdfId('custom-upload');
+          setActiveIngestionMode('ClipboardPaste');
+          setDehyphenateEnabled(false);
+          setOcrInputScan(clip);
+          const detectedLang = detectSourceLanguage(clip);
+          setOnbSourceLang(detectedLang);
+          setOnbProjectName('Tradução: Texto Colado da Área de Transferência');
+          setStatusNotice(
+            `📋 Texto colado da Área de Transferência (${clip.length} caracteres • Idioma detectado: ${detectedLang})!`
+          );
+        }
+      }
+    } catch {
+      setStatusNotice('📋 Cole seu texto diretamente na caixa abaixo (Cmd+V / Ctrl+V)!');
+    }
+  }, []);
+
   const processFileObject = useCallback(
     (file: File) => {
-      const cleanTitle = file.name.replace(/\.(pdf|md|txt)$/i, '').replace(/[_-]+/g, ' ');
+      const lowerName = file.name.toLowerCase();
+      const cleanTitle = file.name
+        .replace(/\.(pdf|docx|doc|rtf|odt|md|markdown|txt|srt|csv)$/i, '')
+        .replace(/[_-]+/g, ' ');
       setUploadedPdfName(file.name);
       setSelectedSamplePdfId('custom-upload');
       setOnbProjectName(`Tradução: ${cleanTitle}`);
 
-      if (file.name.toLowerCase().endsWith('.pdf')) {
+      if (lowerName.endsWith('.docx')) {
+        setActiveIngestionMode('WordDocx');
+        setDehyphenateEnabled(false);
+        setStatusNotice(`⏳ Extraindo parágrafos e títulos do Word "${file.name}"...`);
+        file
+          .arrayBuffer()
+          .then((buf) => extractDocxArrayBufferToMarkdown(buf))
+          .then((md) => {
+            const finalMd =
+              md && md.trim().length > 0
+                ? md
+                : `# ${cleanTitle}\n\nDocumento Word "${file.name}" importado para tradução.`;
+            setOcrInputScan(finalMd);
+            const detectedLang = detectSourceLanguage(finalMd);
+            setOnbSourceLang(detectedLang);
+            setStatusNotice(
+              `📝 Documento Word "${file.name}" extraído instantaneamente sem necessidade de OCR (Idioma: ${detectedLang})!`
+            );
+          });
+        return;
+      }
+
+      if (lowerName.endsWith('.pdf')) {
         setIsOcrLoading(true);
         setOcrProgress({
           currentPage: 1,
@@ -2410,7 +2589,7 @@ export function App() {
           hasMorePages: false,
           usedVisionOcr: true,
         });
-        setStatusNotice(`⏳ Extraindo texto e camada OCR de "${file.name}"...`);
+        setStatusNotice(`⏳ Lendo PDF "${file.name}" (camada de texto nativa / OCR)...`);
         const reader = new FileReader();
         reader.onload = () => {
           const dataUrl = String(reader.result || '');
@@ -2434,7 +2613,7 @@ export function App() {
                   const detectedLang = detectSourceLanguage(out.full_markdown);
                   setOnbSourceLang(detectedLang);
                   setStatusNotice(
-                    `✅ PDF Escaneado "${file.name}" processado pelo motor OCR (Idioma: ${detectedLang})!`
+                    `✅ PDF "${file.name}" estruturado pelo Harness (Idioma: ${detectedLang})!`
                   );
                 }
               })
@@ -2467,15 +2646,20 @@ export function App() {
         };
         reader.readAsDataURL(file);
       } else {
+        const isWordLike =
+          lowerName.endsWith('.doc') || lowerName.endsWith('.rtf') || lowerName.endsWith('.odt');
+        setActiveIngestionMode(isWordLike ? 'WordDocx' : 'PlainTextOrMarkdown');
+        setDehyphenateEnabled(false);
         const reader = new FileReader();
         reader.onload = () => {
-          const text = String(reader.result || '');
+          const rawText = String(reader.result || '');
+          const text = normalizeSrtOrPlainText(file.name, rawText);
           if (text.trim()) {
             setOcrInputScan(text);
             const detectedLang = detectSourceLanguage(text);
             setOnbSourceLang(detectedLang);
             setStatusNotice(
-              `✅ Documento "${file.name}" importado com sucesso (Idioma detectado: ${detectedLang})!`
+              `✅ Documento "${file.name}" importado diretamente sem precisar de OCR (Idioma detectado: ${detectedLang})!`
             );
           }
         };
@@ -2569,6 +2753,8 @@ export function App() {
         setShowOnboarding(true);
       } else if (action === 'trigger-pdf-upload') {
         triggerChooseFile();
+      } else if (action === 'paste-clipboard-source') {
+        triggerPasteClipboard();
       } else if (action === 'export-markdown') {
         handleExportTranslatedMarkdown();
       } else if (action === 'export-searchable-pdf') {
@@ -2608,11 +2794,12 @@ export function App() {
       handleRunLocalModelWithHarness,
       processedOcrMarkdown,
       triggerChooseFile,
+      triggerPasteClipboard,
       uploadedPdfName,
     ]
   );
 
-  // Connect macOS Native Menu Bar, Native File Picker & Native Drag-and-Drop (PDFKit + Apple Vision OCR)
+  // Connect macOS Native Menu Bar, Native File Picker & Native Drag-and-Drop (PDFKit + Apple Vision OCR + Word textutil + Pasteboard)
   useEffect(() => {
     const win = window as unknown as {
       amanuensisMenuAction?: (act: string) => void;
@@ -2628,6 +2815,7 @@ export function App() {
         hasMorePages?: boolean;
         percent?: number;
         usedVisionOcr?: boolean;
+        ingestionMode?: IngestionModeKind;
         partialContent?: string;
         content?: string;
       }) => void;
@@ -2658,21 +2846,41 @@ export function App() {
           setOcrInputScan(payload.partialContent);
         }
         setStatusNotice(
-          `⏳ Extraindo OCR de "${payload.filename}": Página ${cur} de ${tgtEnd} (Total no PDF: ${tot} págs) — ${pct}%`
+          `⏳ Lendo "${payload.filename}": Página ${cur} de ${tgtEnd} (Total: ${tot} págs) — ${pct}%`
         );
         return;
       }
-      if (payload.status === 'done' && payload.content) {
+      if (payload.status === 'done' && payload.content !== undefined) {
         setIsOcrLoading(false);
         const cleanTitle = payload.filename
-          .replace(/\.(pdf|md|txt)$/i, '')
+          .replace(/^clipboard:\/\//i, '')
+          .replace(/\.(pdf|docx|doc|rtf|odt|md|markdown|txt|srt|csv)$/i, '')
           .replace(/[_-]+/g, ' ');
         setUploadedPdfName(payload.filename);
         setSelectedSamplePdfId('custom-upload');
         setOnbProjectName(`Tradução: ${cleanTitle}`);
-        setOcrInputScan(payload.content);
 
-        const detectedLang = detectSourceLanguage(payload.content);
+        const resolvedMode: IngestionModeKind =
+          payload.ingestionMode ||
+          (payload.filename.startsWith('clipboard://')
+            ? 'ClipboardPaste'
+            : /\.(docx|doc|rtf|odt)$/i.test(payload.filename)
+              ? 'WordDocx'
+              : /\.pdf$/i.test(payload.filename)
+                ? payload.usedVisionOcr
+                  ? 'ScannedPdfOcr'
+                  : 'NativeDigitalPdf'
+                : 'PlainTextOrMarkdown');
+
+        setActiveIngestionMode(resolvedMode);
+        const shouldDehyphenate =
+          resolvedMode === 'ScannedPdfOcr' || resolvedMode === 'NativeDigitalPdf';
+        setDehyphenateEnabled(shouldDehyphenate);
+
+        const normalizedContent = normalizeSrtOrPlainText(payload.filename, payload.content);
+        setOcrInputScan(normalizedContent);
+
+        const detectedLang = detectSourceLanguage(normalizedContent);
         setOnbSourceLang(detectedLang);
 
         const scannedUpTo = payload.scannedUpToPage ?? payload.pageCount ?? 1;
@@ -2686,11 +2894,11 @@ export function App() {
           usedVisionOcr: Boolean(payload.usedVisionOcr),
         });
 
-        // Pass raw OCR through the dedicated Scan-to-Structure Formatting Harness BEFORE finalizing!
+        // Pass raw content through the dedicated Formatting Harness BEFORE finalizing!
         const harnessRes = runOcrFormattingHarness(
-          payload.content,
+          normalizedContent,
           chunkGranularity,
-          dehyphenateEnabled
+          shouldDehyphenate
         );
 
         if (harnessRes.segments.length > 0) {
@@ -2712,11 +2920,8 @@ export function App() {
           setActiveSegIdx(0);
         }
 
-        const engineLabel = payload.usedVisionOcr
-          ? 'Apple Vision OCR + Harness Estrutural'
-          : 'PDFKit + Harness Estrutural';
         setStatusNotice(
-          `✅ "${payload.filename}" (Págs. 1–${scannedUpTo} de ${totalPages} • Idioma: ${detectedLang}) estruturado via ${engineLabel}: ${harnessRes.segments.length} trechos curtos (~${harnessRes.stats.avg_segment_chars} caract/trecho • ${harnessRes.audit.lexical_fidelity_pct}% Fidelidade)!`
+          `✅ "${payload.filename}" (${getIngestionModeLabel(resolvedMode)} • Idioma: ${detectedLang}) estruturado: ${harnessRes.segments.length} trechos curtos (~${harnessRes.stats.avg_segment_chars} caract/trecho • ${harnessRes.audit.lexical_fidelity_pct}% Fidelidade)!`
         );
       }
     };
@@ -2743,16 +2948,16 @@ export function App() {
       }}
       onDrop={handleDropFile}
     >
-      {/* Hidden File Input for Scanned PDF / Markdown Upload from Computer */}
+      {/* Hidden File Input for Universal Document Upload from Computer */}
       <input
         ref={pdfFileInputRef}
         type="file"
-        accept=".pdf,.md,.txt"
+        accept=".pdf,.docx,.doc,.rtf,.odt,.md,.markdown,.txt,.srt,.csv"
         style={{ display: 'none' }}
         onChange={handleScannedPdfFileChange}
       />
 
-      {/* Document-First Onboarding Wizard: Step 1 starts directly with the Scanned PDF! */}
+      {/* Universal Document & Text Onboarding Wizard (v1) */}
       {showOnboarding && (
         <div className="onboarding-backdrop">
           <div className="onboarding-modal">
@@ -2765,20 +2970,20 @@ export function App() {
                 />
                 <div>
                   <h2 style={{ fontSize: '1.08rem', marginBottom: '2px' }}>
-                    Fluxo de Primeiro Uso — Comece pelo seu PDF Escaneado
+                    Central de Entrada Universal — Traga Qualquer Documento ou Texto para Traduzir
                   </h2>
                   <p style={{ fontSize: '0.78rem', opacity: 0.94 }}>
-                    Passo 1: Importe ou Arraste seu PDF Escaneado → Passo 2: Escolha sua
-                    Especialidade → Passo 3: Veja a IA Recomendada p/ seu Mac e Traduza
+                    Passo 1: PDF Digital, PDF Escaneado, Word (.docx), Texto Colado (Cmd+V) ou Markdown →
+                    Passo 2: Especialidade & Harness → Passo 3: IA Local e Traduzir
                   </p>
                 </div>
               </div>
-              <span className="brand-badge">v0.1.0 Desktop</span>
+              <span className="brand-badge">v1.0 Desktop</span>
             </div>
 
             <div className="onboarding-steps-bar">
               {[
-                { step: 1, label: '1. 📄 Seu PDF Escaneado (OCR → PDF/MD)' },
+                { step: 1, label: '1. 📥 Fonte do Texto (PDF, Word, Colar Cmd+V, MD/TXT)' },
                 { step: 2, label: '2. 🎯 Sua Especialidade & Harness' },
                 { step: 3, label: '3. 💻 IA Local p/ Seu Computador & Traduzir' },
               ].map((s) => (
@@ -2810,148 +3015,302 @@ export function App() {
                   >
                     <div>
                       <h3 style={{ fontSize: '1rem', marginBottom: '2px' }}>
-                        Passo 1: Por onde começar? Clique ou Arraste seu PDF Escaneado abaixo
+                        Passo 1: Como você quer trazer seu texto para traduzir hoje?
                       </h3>
-                      <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                        O Amanuensis usa <strong>PDFKit + Apple Vision OCR</strong> em lotes rápidos
-                        de 10 páginas com barra de progresso ao vivo e detecção automática de idioma:
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                        Você <strong>não precisa</strong> começar apenas por um scan! Escolha abaixo entre abrir um{' '}
+                        <strong>PDF Digital normal</strong>, um <strong>Word (.docx)</strong>,{' '}
+                        <strong>Colar um texto copiado (Cmd+V)</strong>, <strong>.md/.txt/.srt</strong> ou um{' '}
+                        <strong>PDF Escaneado (OCR)</strong>:
                       </p>
                     </div>
+                    <span className="badge badge-exact" style={{ fontSize: '0.75rem' }}>
+                      Modo Ativo: {getIngestionModeLabel(activeIngestionMode)}
+                    </span>
                   </div>
 
-                  {/* Primary Action: Choose or Drag-and-Drop Scanned PDF from Computer */}
+                  {/* 3 Universal Entry Doors Selector */}
                   <div
-                    className="pdf-dropzone"
                     style={{
-                      borderColor: isDraggingFile ? 'var(--success)' : 'var(--accent)',
-                      background: isDraggingFile ? 'rgba(60, 141, 13, 0.14)' : 'var(--page-canvas)',
-                      borderWidth: isDraggingFile ? '3px' : '2px',
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(3, 1fr)',
+                      gap: '8px',
+                      marginBottom: '10px',
                     }}
-                    onClick={() => {
-                      if (!isOcrLoading) triggerChooseFile();
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setIsDraggingFile(true);
-                    }}
-                    onDragEnter={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setIsDraggingFile(true);
-                    }}
-                    onDragLeave={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setIsDraggingFile(false);
-                    }}
-                    onDrop={handleDropFile}
                   >
-                    {isOcrLoading ? (
-                      <div onClick={(e) => e.stopPropagation()}>
-                        <div
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            fontSize: '0.88rem',
-                            fontWeight: 700,
-                            color: 'var(--accent)',
-                            marginBottom: '4px',
-                          }}
-                        >
-                          <span>
-                            ⏳ Processando OCR de "{uploadedPdfName.slice(0, 48)}
-                            {uploadedPdfName.length > 48 ? '…' : ''}"
-                          </span>
-                          <span className="badge badge-exact">
-                            Página {ocrProgress.currentPage} de {ocrProgress.targetEndPage} (Total
-                            no PDF: {ocrProgress.totalPdfPages} págs) • {ocrProgress.percent}%
-                          </span>
+                    <button
+                      type="button"
+                      className={`btn ${ingestionPortalMode === 'files' ? 'btn-primary' : ''}`}
+                      style={{ padding: '8px 10px', justifyContent: 'flex-start', textAlign: 'left' }}
+                      onClick={() => setIngestionPortalMode('files')}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: '0.82rem' }}>
+                          📂 1. Abrir ou Arrastar Arquivo
                         </div>
-
-                        {/* Windows XP Segmented Green Progress Bar */}
-                        <div className="xp-progress-track">
-                          <div
-                            className="xp-progress-fill"
-                            style={{ width: `${ocrProgress.percent}%` }}
-                          />
-                        </div>
-
-                        <div
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            marginTop: '6px',
-                          }}
-                        >
-                          <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-                            O texto extraído já está aparecendo na prévia abaixo página por página...
-                          </span>
-                          <button
-                            type="button"
-                            className="btn btn-success"
-                            onClick={triggerStopOcr}
-                          >
-                            ⏹️ Parar Aqui & Usar as {ocrProgress.currentPage} Páginas Já Extraídas
-                          </button>
+                        <div style={{ fontSize: '0.71rem', opacity: 0.88 }}>
+                          PDF Normal, PDF Escaneado, Word (.docx), .md, .txt, .srt
                         </div>
                       </div>
-                    ) : (
-                      <>
-                        <div
-                          style={{
-                            fontSize: '1.02rem',
-                            fontWeight: 700,
-                            marginBottom: '6px',
-                            color: isDraggingFile ? 'var(--success)' : 'var(--accent)',
-                          }}
-                        >
-                          {isDraggingFile
-                            ? '📥 Solte o seu arquivo PDF Escaneado (.pdf, .md, .txt) aqui!'
-                            : '📂 Clique Aqui para Escolher no Finder ou Arraste seu PDF Escaneado (.pdf) para esta área'}
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`btn ${ingestionPortalMode === 'clipboard' ? 'btn-primary' : ''}`}
+                      style={{ padding: '8px 10px', justifyContent: 'flex-start', textAlign: 'left' }}
+                      onClick={() => {
+                        setIngestionPortalMode('clipboard');
+                        setActiveIngestionMode('ClipboardPaste');
+                        setDehyphenateEnabled(false);
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: '0.82rem' }}>
+                          📋 2. Colar Texto Copiado (Cmd+V)
                         </div>
-                        <div
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'center',
-                            gap: '8px',
-                            marginBottom: '6px',
-                            flexWrap: 'wrap',
-                          }}
-                        >
+                        <div style={{ fontSize: '0.71rem', opacity: 0.88 }}>
+                          Artigo da web, e-mail, trecho de livro ou digitação direta
+                        </div>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`btn ${ingestionPortalMode === 'samples' ? 'btn-primary' : ''}`}
+                      style={{ padding: '8px 10px', justifyContent: 'flex-start', textAlign: 'left' }}
+                      onClick={() => setIngestionPortalMode('samples')}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: '0.82rem' }}>
+                          🧪 3. Textos & Documentos de Exemplo
+                        </div>
+                        <div style={{ fontSize: '0.71rem', opacity: 0.88 }}>
+                          Teste imediato (Política, Acadêmico ou Literatura)
+                        </div>
+                      </div>
+                    </button>
+                  </div>
+
+                  {ingestionPortalMode === 'clipboard' ? (
+                    <div
+                      className="card"
+                      style={{
+                        marginBottom: '12px',
+                        border: '2px solid var(--accent)',
+                        background: 'var(--bg-surface)',
+                      }}
+                    >
+                      <div
+                        className="card-title"
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: '8px',
+                        }}
+                      >
+                        <span>📋 Colar Texto da Área de Transferência ou Digitar Direto (Sem OCR)</span>
+                        <div style={{ display: 'flex', gap: '6px' }}>
                           <button
                             type="button"
                             className="btn btn-primary"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              triggerChooseFile();
+                            onClick={triggerPasteClipboard}
+                          >
+                            📋 Puxar Texto Copiado do macOS Agora (Cmd+V)
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => {
+                              setUploadedPdfName('clipboard://Novo_Texto_Colado.txt');
+                              setActiveIngestionMode('ClipboardPaste');
+                              setDehyphenateEnabled(false);
+                              setOcrInputScan('');
                             }}
                           >
-                            📂 Abrir Seletor de Arquivos do macOS (.pdf, .md, .txt)
+                            🧹 Limpar Caixa
                           </button>
-                          {ocrProgress.hasMorePages && (
+                        </div>
+                      </div>
+                      <p style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                        Cole abaixo qualquer texto que você copiou (de um site, Google Docs, Word, e-mail ou
+                        mensagem). O <strong>Harness de Estruturação</strong> vai separar automaticamente os
+                        títulos e dividir os parágrafos em trechos curtos de 1 a 2 frases:
+                      </p>
+                      <textarea
+                        className="code-editor"
+                        style={{ minHeight: '135px', fontSize: '0.82rem' }}
+                        placeholder="Cole aqui o texto copiado (Cmd+V) ou digite diretamente..."
+                        value={ocrInputScan}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setUploadedPdfName('clipboard://Texto_Colado_Direto.txt');
+                          setSelectedSamplePdfId('custom-upload');
+                          setActiveIngestionMode('ClipboardPaste');
+                          setDehyphenateEnabled(false);
+                          setOcrInputScan(val);
+                          if (val.trim().length > 12) {
+                            setOnbSourceLang(detectSourceLanguage(val));
+                          }
+                        }}
+                      />
+                    </div>
+                  ) : (
+                    /* Primary Action: Choose or Drag-and-Drop Any Document from Computer */
+                    <div
+                      className="pdf-dropzone"
+                      style={{
+                        borderColor: isDraggingFile ? 'var(--success)' : 'var(--accent)',
+                        background: isDraggingFile ? 'rgba(60, 141, 13, 0.14)' : 'var(--page-canvas)',
+                        borderWidth: isDraggingFile ? '3px' : '2px',
+                      }}
+                      onClick={() => {
+                        if (!isOcrLoading) triggerChooseFile();
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setIsDraggingFile(true);
+                      }}
+                      onDragEnter={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setIsDraggingFile(true);
+                      }}
+                      onDragLeave={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setIsDraggingFile(false);
+                      }}
+                      onDrop={handleDropFile}
+                    >
+                      {isOcrLoading ? (
+                        <div onClick={(e) => e.stopPropagation()}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              fontSize: '0.88rem',
+                              fontWeight: 700,
+                              color: 'var(--accent)',
+                              marginBottom: '4px',
+                            }}
+                          >
+                            <span>
+                              ⏳ Lendo "{uploadedPdfName.slice(0, 48)}
+                              {uploadedPdfName.length > 48 ? '…' : ''}"
+                            </span>
+                            <span className="badge badge-exact">
+                              Página {ocrProgress.currentPage} de {ocrProgress.targetEndPage} (Total:{' '}
+                              {ocrProgress.totalPdfPages} págs) • {ocrProgress.percent}%
+                            </span>
+                          </div>
+
+                          {/* Windows XP Segmented Green Progress Bar */}
+                          <div className="xp-progress-track">
+                            <div
+                              className="xp-progress-fill"
+                              style={{ width: `${ocrProgress.percent}%` }}
+                            />
+                          </div>
+
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              marginTop: '6px',
+                            }}
+                          >
+                            <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+                              O texto extraído já está sendo estruturado em trechos curtos abaixo...
+                            </span>
                             <button
                               type="button"
                               className="btn btn-success"
+                              onClick={triggerStopOcr}
+                            >
+                              ⏹️ Parar Aqui & Usar as {ocrProgress.currentPage} Páginas Já Extraídas
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div
+                            style={{
+                              fontSize: '0.98rem',
+                              fontWeight: 700,
+                              marginBottom: '6px',
+                              color: isDraggingFile ? 'var(--success)' : 'var(--accent)',
+                            }}
+                          >
+                            {isDraggingFile
+                              ? '📥 Solte aqui seu PDF (Digital ou Escaneado), Word (.docx), Markdown (.md), Texto (.txt) ou Legenda (.srt)!'
+                              : '📂 Clique Aqui ou Arraste seu Documento (PDF Normal, PDF Escaneado, Word .docx, .md, .txt, .srt)'}
+                          </div>
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'center',
+                              gap: '6px',
+                              marginBottom: '8px',
+                              flexWrap: 'wrap',
+                            }}
+                          >
+                            <span className="badge">📄 PDF Digital (Extração Direta s/ OCR)</span>
+                            <span className="badge">📝 Word (.docx / .rtf / .odt)</span>
+                            <span className="badge">📑 Markdown / TXT / SRT (.md, .txt, .srt)</span>
+                            <span className="badge">🔍 PDF Escaneado (Apple Vision OCR)</span>
+                          </div>
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'center',
+                              gap: '8px',
+                              marginBottom: '6px',
+                              flexWrap: 'wrap',
+                            }}
+                          >
+                            <button
+                              type="button"
+                              className="btn btn-primary"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                triggerScanMorePages();
+                                triggerChooseFile();
                               }}
                             >
-                              ➕ Escanear Próximas 10 Páginas ({ocrProgress.currentPage}/
-                              {ocrProgress.totalPdfPages} págs lidas)
+                              📂 Escolher Arquivo no Finder (.pdf, .docx, .md, .txt, .srt)
                             </button>
-                          )}
-                        </div>
-                        <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-                          Ou clique em um dos <strong>3 PDFs Escaneados de Exemplo</strong> abaixo
-                          para testar imediatamente:
-                        </div>
-                      </>
-                    )}
-                  </div>
+                            <button
+                              type="button"
+                              className="btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                triggerPasteClipboard();
+                              }}
+                            >
+                              📋 Ou Colar Texto Copiado (Cmd+V)
+                            </button>
+                            {ocrProgress.hasMorePages && (
+                              <button
+                                type="button"
+                                className="btn btn-success"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  triggerScanMorePages();
+                                }}
+                              >
+                                ➕ Ler Próximas 10 Páginas ({ocrProgress.currentPage}/
+                                {ocrProgress.totalPdfPages} págs lidas)
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
 
                   {/* 3 One-Click Sample Scanned PDFs for Instant Onboarding Testing */}
                   <div
@@ -3872,7 +4231,7 @@ export function App() {
                   className="menu-dropdown-item"
                   onClick={() => executeMenuAction('open-onboarding-step1')}
                 >
-                  <span>📄 Novo Projeto a partir de PDF Escaneado (Onboarding)...</span>
+                  <span>📥 Central de Entrada Universal (PDF, Word, Colar, MD)...</span>
                   <span className="menu-shortcut">⌘N</span>
                 </button>
                 <button
@@ -3880,8 +4239,16 @@ export function App() {
                   className="menu-dropdown-item"
                   onClick={() => executeMenuAction('trigger-pdf-upload')}
                 >
-                  <span>📂 Abrir / Importar PDF Escaneado do Computador (.pdf)...</span>
+                  <span>📂 Abrir Documento (.pdf Digital/Scan, Word .docx, .md, .txt, .srt)...</span>
                   <span className="menu-shortcut">⌘O</span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-dropdown-item"
+                  onClick={() => executeMenuAction('paste-clipboard-source')}
+                >
+                  <span>📋 Colar Texto da Área de Transferência para Traduzir...</span>
+                  <span className="menu-shortcut">⇧⌘V</span>
                 </button>
                 <div className="menu-divider" />
                 <button
