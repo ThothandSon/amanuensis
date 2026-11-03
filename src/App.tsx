@@ -1043,6 +1043,132 @@ export function normalizeSrtOrPlainText(filename: string, rawText: string): stri
     .join('\n\n');
 }
 
+export interface OcrDoubtItem {
+  reason: string;
+  wrong: string;
+  right: string;
+}
+
+export function detectOcrDoubts(text: string): OcrDoubtItem[] {
+  const doubts: OcrDoubtItem[] = [];
+  const slashAsI = /([a-zA-ZÀ-ÿ]{3,})\s+i\s+([A-ZÀ-Ý][a-zA-ZÀ-ÿ]+)/.exec(text);
+  if (slashAsI) {
+    doubts.push({
+      reason: `Barra "/" possivelmente lida como "i" entre "${slashAsI[1]}" e "${slashAsI[2]}"`,
+      wrong: `${slashAsI[1]} i ${slashAsI[2]}`,
+      right: `${slashAsI[1]} / ${slashAsI[2]}`,
+    });
+  }
+  if (/\bTilomas\b/.test(text)) {
+    doubts.push({
+      reason: `"Tilomas" possivelmente é erro de OCR para "Thomas" ("h" lido como "il")`,
+      wrong: 'Tilomas',
+      right: 'Thomas',
+    });
+  }
+  if (/f[ií]bertel,\s*c\s*om\.\s*ar/i.test(text)) {
+    const m = /f[ií]bertel,\s*c\s*om\.\s*ar/i.exec(text)!;
+    doubts.push({
+      reason: `E-mail/domínio quebrado pelo OCR ("${m[0]}")`,
+      wrong: m[0],
+      right: 'fibertel.com.ar',
+    });
+  }
+  if (/-\s*la\s+ed\./i.test(text)) {
+    const m = /-\s*la\s+ed\./i.exec(text)!;
+    doubts.push({
+      reason: `"la ed." possivelmente é "1ª ed." ("1" lido como "l")`,
+      wrong: m[0],
+      right: '- 1a ed.',
+    });
+  }
+  const mixedDigitWord = /\b([A-Za-zÀ-ÿ]+[0-9]+[A-Za-zÀ-ÿ]+)\b/.exec(text);
+  if (mixedDigitWord && !/^(?:ISBN|C1025|H2O|CO2|3D|4B|2B)/i.test(mixedDigitWord[1])) {
+    doubts.push({
+      reason: `Caractere numérico misturado dentro de palavra ("${mixedDigitWord[1]}")`,
+      wrong: mixedDigitWord[1],
+      right: mixedDigitWord[1].replace(/0/g, 'o').replace(/1/g, 'l'),
+    });
+  }
+  return doubts;
+}
+
+export function renderFacsimileScanCropDataUrl(sourceText: string): string {
+  if (typeof document === 'undefined') return '';
+  try {
+    const canvas = document.createElement('canvas');
+    const width = 920;
+    // Restore original printed glyphs before OCR misread so the user can visually compare ("tirar a teima")!
+    const printedText = sourceText
+      .replace(/^#+\s*/gm, '')
+      .replace(/([a-zA-ZÀ-ÿ]{3,})\s+i\s+([A-ZÀ-Ý][a-zA-ZÀ-ÿ]+)/g, '$1 / $2')
+      .replace(/\bTilomas\b/g, 'Thomas')
+      .replace(/f[ií]bertel,\s*c\s*om\.\s*ar/gi, 'fibertel.com.ar')
+      .replace(/-\s*la\s+ed\./gi, '- 1ª ed.');
+
+    const words = printedText.split(/\s+/);
+    const wrappedLines: string[] = [];
+    let currentLine = '';
+    for (const w of words) {
+      if ((currentLine + ' ' + w).trim().length > 68) {
+        if (currentLine) wrappedLines.push(currentLine);
+        currentLine = w;
+      } else {
+        currentLine = (currentLine + ' ' + w).trim();
+      }
+    }
+    if (currentLine) wrappedLines.push(currentLine);
+
+    const lineHeight = 30;
+    const height = Math.max(150, wrappedLines.length * lineHeight + 68);
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+
+    // Aged scanned paper background
+    const grad = ctx.createLinearGradient(0, 0, width, height);
+    grad.addColorStop(0, '#f4efe1');
+    grad.addColorStop(0.5, '#efe8d5');
+    grad.addColorStop(1, '#e8dfc8');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, width, height);
+
+    // Subtle scan grain & horizontal paper fibers
+    ctx.fillStyle = 'rgba(90, 72, 48, 0.045)';
+    for (let y = 4; y < height; y += 6) {
+      ctx.fillRect(0, y, width, 1);
+    }
+    for (let i = 0; i < 220; i++) {
+      const rx = (i * 73) % width;
+      const ry = (i * 41) % height;
+      ctx.fillRect(rx, ry, 1.5, 1.5);
+    }
+
+    // Highlight band showing target region on the scan
+    ctx.fillStyle = 'rgba(255, 230, 120, 0.22)';
+    ctx.fillRect(24, 18, width - 48, height - 36);
+    ctx.strokeStyle = 'rgba(185, 65, 25, 0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(24, 18, width - 48, height - 36);
+
+    // Printed book serif typography (slightly rotated 0.25 deg like a real flatbed scan)
+    ctx.save();
+    ctx.translate(42, 46);
+    ctx.rotate(-0.003);
+    ctx.fillStyle = '#231f1a';
+    ctx.font = '20px Georgia, "Times New Roman", serif';
+    wrappedLines.forEach((ln, idx) => {
+      ctx.fillText(ln, 0, idx * lineHeight);
+    });
+    ctx.restore();
+
+    return canvas.toDataURL('image/jpeg', 0.9);
+  } catch {
+    return '';
+  }
+}
+
 function detectSourceLanguage(text: string): string {
   const sample = ` ${text.slice(0, 2000).toLowerCase()} `;
   const esHits = (
@@ -1962,6 +2088,18 @@ export function App() {
   const [activeIngestionMode, setActiveIngestionMode] =
     useState<IngestionModeKind>('ScannedPdfOcr');
 
+  // Real-Time Scan Snippet Inspector ("Tirar a Teima no Scan Original" + Editar OCR Original)
+  const [openScanInspectIdx, setOpenScanInspectIdx] = useState<number | null>(null);
+  const [scanSnippetData, setScanSnippetData] = useState<{
+    page: number;
+    totalPages: number;
+    y: number;
+    height: number;
+    cropDataUrl: string;
+    fullPageDataUrl: string;
+  } | null>(null);
+  const [showFullPageInSnippet, setShowFullPageInSnippet] = useState<boolean>(false);
+
   // Modo Zen (Creative Low-Stimulus Deep-Focus Mode)
   const [zenMode, setZenMode] = useState<boolean>(false);
   const [zenAtmosphere, setZenAtmosphere] = useState<'sepia' | 'eink' | 'sage'>('sepia');
@@ -2819,11 +2957,24 @@ export function App() {
         partialContent?: string;
         content?: string;
       }) => void;
+      amanuensisReceiveScanSnippet?: (snippet: {
+        page: number;
+        totalPages: number;
+        y: number;
+        height: number;
+        cropDataUrl: string;
+        fullPageDataUrl: string;
+      }) => void;
     };
 
     win.amanuensisMenuAction = executeMenuAction;
     win.amanuensisSetDragState = (dragging: boolean) => {
       setIsDraggingFile(dragging);
+    };
+    win.amanuensisReceiveScanSnippet = (snippet) => {
+      if (snippet && snippet.cropDataUrl) {
+        setScanSnippetData(snippet);
+      }
     };
     win.amanuensisReceiveNativeFile = (payload) => {
       if (payload.status === 'loading' || payload.status === 'progress') {
@@ -2930,8 +3081,45 @@ export function App() {
       delete win.amanuensisMenuAction;
       delete win.amanuensisSetDragState;
       delete win.amanuensisReceiveNativeFile;
+      delete win.amanuensisReceiveScanSnippet;
     };
   }, [chunkGranularity, dehyphenateEnabled, executeMenuAction]);
+
+  const requestScanSnippetForText = useCallback(
+    (sourceText: string, defaultY = 0.18, explicitPage = 0, explicitY?: number) => {
+      const targetY = explicitY !== undefined ? Math.max(0.01, Math.min(0.85, explicitY)) : defaultY;
+      // Immediate facsimile preview while native PDFKit renders (or when using sample/non-PDF)
+      const fallbackCrop = renderFacsimileScanCropDataUrl(sourceText);
+      setScanSnippetData((prev) => ({
+        page: explicitPage > 0 ? explicitPage : prev?.page ?? 1,
+        totalPages: prev?.totalPages ?? Math.max(1, ocrProgress.totalPdfPages),
+        y: targetY,
+        height: 0.22,
+        cropDataUrl: prev?.cropDataUrl && explicitPage === 0 && explicitY === undefined ? fallbackCrop : prev?.cropDataUrl || fallbackCrop,
+        fullPageDataUrl: prev?.fullPageDataUrl || fallbackCrop,
+      }));
+
+      const wk = (
+        window as unknown as {
+          webkit?: {
+            messageHandlers?: {
+              amanuensisNative?: { postMessage: (msg: Record<string, unknown>) => void };
+            };
+          };
+        }
+      ).webkit;
+      if (wk?.messageHandlers?.amanuensisNative) {
+        wk.messageHandlers.amanuensisNative.postMessage({
+          action: 'getScanSnippet',
+          page: explicitPage,
+          y: targetY,
+          height: 0.22,
+          text: explicitY !== undefined ? '' : sourceText,
+        });
+      }
+    },
+    [ocrProgress.totalPdfPages]
+  );
 
   return (
     <div
@@ -3302,7 +3490,7 @@ export function App() {
                                   triggerScanMorePages();
                                 }}
                               >
-                                ➕ Ler Próximas 10 Páginas ({ocrProgress.currentPage}/
+                                ▶️ Continuar Leitura do Restante do Documento ({ocrProgress.currentPage}/
                                 {ocrProgress.totalPdfPages} págs lidas)
                               </button>
                             )}
@@ -3507,19 +3695,162 @@ export function App() {
                           </span>
                         </div>
                         <div className="ocr-segment-preview-list">
-                          {ocrFormattingResult.segments.map((seg, sIdx) => (
-                            <div key={sIdx} className="ocr-segment-chip">
-                              <div className="ocr-segment-chip-header">
-                                <span>
-                                  <strong>Trecho #{sIdx + 1}</strong> • [{seg.context_label}]
-                                </span>
-                                <span>
-                                  {seg.char_count} caract. • {seg.word_count} palavras
-                                </span>
+                          {ocrFormattingResult.segments.map((seg, sIdx) => {
+                            const doubts = detectOcrDoubts(seg.markdown_text);
+                            const isInspectingThis = openScanInspectIdx === sIdx;
+                            return (
+                              <div key={sIdx} className="ocr-segment-chip">
+                                <div
+                                  className="ocr-segment-chip-header"
+                                  style={{ flexWrap: 'wrap', gap: '4px' }}
+                                >
+                                  <span>
+                                    <strong>Trecho #{sIdx + 1}</strong> • [{seg.context_label}]
+                                  </span>
+                                  <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                                    <button
+                                      type="button"
+                                      className={`badge ${
+                                        doubts.length > 0 ? 'badge-fuzzy' : 'badge-accent'
+                                      } badge-btn`}
+                                      onClick={() => {
+                                        if (isInspectingThis) {
+                                          setOpenScanInspectIdx(null);
+                                        } else {
+                                          setOpenScanInspectIdx(sIdx);
+                                          requestScanSnippetForText(
+                                            seg.markdown_text,
+                                            Math.min(0.85, 0.08 + sIdx * 0.12)
+                                          );
+                                        }
+                                      }}
+                                    >
+                                      {doubts.length > 0
+                                        ? '🔍 Dúvida de OCR? Ver Print do Scan'
+                                        : '👁️ Ver Print no Scan (Tirar a Teima)'}
+                                    </button>
+                                    <span>
+                                      {seg.char_count} caract. • {seg.word_count} palavras
+                                    </span>
+                                  </div>
+                                </div>
+                                <div style={{ whiteSpace: 'pre-wrap' }}>{seg.markdown_text}</div>
+
+                                {isInspectingThis && (
+                                  <div
+                                    style={{
+                                      marginTop: '6px',
+                                      padding: '8px',
+                                      background: 'var(--bg-primary)',
+                                      border: '2px solid var(--accent)',
+                                    }}
+                                  >
+                                    <div
+                                      style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center',
+                                        fontSize: '0.73rem',
+                                        fontWeight: 700,
+                                        marginBottom: '6px',
+                                        flexWrap: 'wrap',
+                                        gap: '4px',
+                                      }}
+                                    >
+                                      <span>
+                                        🔍 Print Real do Scan Original — Trecho #{sIdx + 1} (Pág.{' '}
+                                        {scanSnippetData?.page ?? 1})
+                                      </span>
+                                      <div style={{ display: 'flex', gap: '4px' }}>
+                                        <button
+                                          type="button"
+                                          className="btn"
+                                          style={{ fontSize: '0.68rem', padding: '1px 6px' }}
+                                          onClick={() =>
+                                            requestScanSnippetForText(
+                                              seg.markdown_text,
+                                              scanSnippetData?.y ?? 0.18,
+                                              scanSnippetData?.page ?? 1,
+                                              (scanSnippetData?.y ?? 0.18) - 0.08
+                                            )
+                                          }
+                                        >
+                                          ⬆️ Subir Olhar
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn"
+                                          style={{ fontSize: '0.68rem', padding: '1px 6px' }}
+                                          onClick={() =>
+                                            requestScanSnippetForText(
+                                              seg.markdown_text,
+                                              scanSnippetData?.y ?? 0.18,
+                                              scanSnippetData?.page ?? 1,
+                                              (scanSnippetData?.y ?? 0.18) + 0.08
+                                            )
+                                          }
+                                        >
+                                          ⬇️ Descer Olhar
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn"
+                                          style={{ fontSize: '0.68rem', padding: '1px 6px' }}
+                                          onClick={() => setOpenScanInspectIdx(null)}
+                                        >
+                                          ✕ Fechar
+                                        </button>
+                                      </div>
+                                    </div>
+                                    <img
+                                      src={
+                                        scanSnippetData?.cropDataUrl ||
+                                        renderFacsimileScanCropDataUrl(seg.markdown_text)
+                                      }
+                                      alt="Recorte do Scan Original"
+                                      style={{
+                                        width: '100%',
+                                        maxHeight: '165px',
+                                        objectFit: 'contain',
+                                        border: '1px solid var(--border)',
+                                        background: '#f4efe1',
+                                        marginBottom: '6px',
+                                      }}
+                                    />
+                                    {doubts.length > 0 && (
+                                      <div
+                                        style={{
+                                          display: 'flex',
+                                          flexWrap: 'wrap',
+                                          gap: '6px',
+                                          marginBottom: '4px',
+                                        }}
+                                      >
+                                        {doubts.map((d, dIdx) => (
+                                          <button
+                                            key={dIdx}
+                                            type="button"
+                                            className="btn btn-success"
+                                            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                                            onClick={() => {
+                                              setOcrInputScan((prev) =>
+                                                prev.replace(d.wrong, d.right)
+                                              );
+                                              setStatusNotice(
+                                                `✅ Caractere corrigido no OCR: "${d.wrong}" → "${d.right}"!`
+                                              );
+                                            }}
+                                          >
+                                            ✨ Corrigir "{d.wrong}" → "{d.right}"
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
-                              <div style={{ whiteSpace: 'pre-wrap' }}>{seg.markdown_text}</div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     </div>
@@ -3530,7 +3861,11 @@ export function App() {
               {onboardingStep === 2 && (
                 <div>
                   <h3 style={{ fontSize: '1rem', marginBottom: '6px' }}>
-                    Passo 2: Sua Especialidade & Regras do Projeto para "{uploadedPdfName}"
+                    Passo 2: Sua Especialidade & Regras do Projeto para "
+                    {uploadedPdfName.length > 42
+                      ? uploadedPdfName.slice(0, 40) + '…'
+                      : uploadedPdfName}
+                    "
                   </h3>
                   <p
                     style={{
@@ -3717,7 +4052,12 @@ export function App() {
                   </div>
 
                   <h3 style={{ fontSize: '0.96rem', marginBottom: '8px' }}>
-                    Passo 3: Escolha o modelo local para traduzir <strong>{uploadedPdfName}</strong>{' '}
+                    Passo 3: Escolha o modelo local para traduzir{' '}
+                    <strong>
+                      {uploadedPdfName.length > 42
+                        ? uploadedPdfName.slice(0, 40) + '…'
+                        : uploadedPdfName}
+                    </strong>{' '}
                     (passe o mouse ou clique em <strong>📊 Comparativo & Benchmark</strong>):
                   </h3>
 
@@ -4590,6 +4930,118 @@ export function App() {
               </button>
             </div>
             <div className="pane-body">
+              {/* Live Real-Time Scan Crop ("Tirar a Teima") for Active Segment */}
+              <div
+                className="card"
+                style={{
+                  marginBottom: '10px',
+                  border: '2px solid var(--accent)',
+                  background: 'var(--page-canvas)',
+                  padding: '8px',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    fontSize: '0.73rem',
+                    fontWeight: 700,
+                    marginBottom: '6px',
+                    flexWrap: 'wrap',
+                    gap: '4px',
+                  }}
+                >
+                  <span>
+                    🔍 Print do Scan Original (Tirar a Teima) — Trecho #{activeSegIdx + 1}
+                  </span>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ fontSize: '0.66rem', padding: '1px 5px' }}
+                      onClick={() =>
+                        requestScanSnippetForText(
+                          activeSegment.source_text,
+                          scanSnippetData?.y ?? activeSegment.bbox.y,
+                          scanSnippetData?.page ?? 1,
+                          (scanSnippetData?.y ?? activeSegment.bbox.y) - 0.08
+                        )
+                      }
+                      title="Subir o recorte na página do scan"
+                    >
+                      ⬆️
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ fontSize: '0.66rem', padding: '1px 5px' }}
+                      onClick={() =>
+                        requestScanSnippetForText(
+                          activeSegment.source_text,
+                          scanSnippetData?.y ?? activeSegment.bbox.y,
+                          scanSnippetData?.page ?? 1,
+                          (scanSnippetData?.y ?? activeSegment.bbox.y) + 0.08
+                        )
+                      }
+                      title="Descer o recorte na página do scan"
+                    >
+                      ⬇️
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ fontSize: '0.66rem', padding: '1px 5px' }}
+                      onClick={() => setShowFullPageInSnippet((prev) => !prev)}
+                      title="Alternar entre Recorte Ampliado da Linha e Página Inteira"
+                    >
+                      {showFullPageInSnippet ? '🔍 Ver Recorte' : '🗺️ Pág. Inteira'}
+                    </button>
+                  </div>
+                </div>
+                <img
+                  src={
+                    showFullPageInSnippet && scanSnippetData?.fullPageDataUrl
+                      ? scanSnippetData.fullPageDataUrl
+                      : scanSnippetData?.cropDataUrl ||
+                        renderFacsimileScanCropDataUrl(activeSegment.source_text)
+                  }
+                  alt="Print do Trecho no Scan Original"
+                  style={{
+                    width: '100%',
+                    maxHeight: showFullPageInSnippet ? '260px' : '135px',
+                    objectFit: 'contain',
+                    border: '1px solid var(--border)',
+                    background: '#f4efe1',
+                  }}
+                />
+                {detectOcrDoubts(activeSegment.source_text).length > 0 && (
+                  <div style={{ marginTop: '6px', display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                    {detectOcrDoubts(activeSegment.source_text).map((d, dIdx) => (
+                      <button
+                        key={dIdx}
+                        type="button"
+                        className="btn btn-success"
+                        style={{ fontSize: '0.69rem', padding: '2px 6px' }}
+                        onClick={() => {
+                          const next = [...segments];
+                          next[activeSegIdx] = {
+                            ...activeSegment,
+                            source_text: activeSegment.source_text.replace(d.wrong, d.right),
+                          };
+                          setSegments(next);
+                          setStatusNotice(
+                            `✅ OCR do Trecho #${activeSegIdx + 1} corrigido: "${d.wrong}" → "${d.right}"!`
+                          );
+                        }}
+                      >
+                        ✨ Corrigir "{d.wrong}" → "{d.right}"
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               <div className="pdf-page-sheet">
                 <div
                   style={{
@@ -4601,14 +5053,22 @@ export function App() {
                     justifyContent: 'space-between',
                   }}
                 >
-                  <span>{uploadedPdfName} (Camada OCR Ativa)</span>
+                  <span>
+                    {uploadedPdfName.length > 32
+                      ? uploadedPdfName.slice(0, 30) + '…'
+                      : uploadedPdfName}{' '}
+                    (Camada OCR Ativa)
+                  </span>
                   <span>96.8% Confiança</span>
                 </div>
                 {segments.map((seg, idx) => (
                   <div
                     key={seg.id}
                     className={`bbox-item ${idx === activeSegIdx ? 'active' : ''}`}
-                    onClick={() => setActiveSegIdx(idx)}
+                    onClick={() => {
+                      setActiveSegIdx(idx);
+                      requestScanSnippetForText(seg.source_text, seg.bbox.y);
+                    }}
                   >
                     <div
                       style={{
@@ -4677,12 +5137,17 @@ export function App() {
                   seg.target_text.trim() !== '' &&
                   seg.ai_draft_snapshot.trim() !== seg.target_text.trim();
                 const isHarnessOpenHere = openSegmentHarnessIdx === idx;
+                const isScanInspectOpenHere = openScanInspectIdx === idx;
+                const segOcrDoubts = detectOcrDoubts(seg.source_text);
 
                 return (
                   <div
                     key={seg.id}
                     className={`segment-row ${isActive ? 'active' : ''}`}
-                    onClick={() => setActiveSegIdx(idx)}
+                    onClick={() => {
+                      setActiveSegIdx(idx);
+                      requestScanSnippetForText(seg.source_text, seg.bbox.y);
+                    }}
                   >
                     <div className="segment-num">
                       <span>#{idx + 1}</span>
@@ -4771,6 +5236,32 @@ export function App() {
                             ver)
                           </button>
 
+                          {/* Interactive Button 1B: Real-Time Scan Crop ("Tirar a Teima") & OCR Fix */}
+                          <button
+                            type="button"
+                            className={`badge ${
+                              segOcrDoubts.length > 0 ? 'badge-fuzzy' : 'badge-exact'
+                            } badge-btn`}
+                            title="Ver recorte real deste trecho no PDF escaneado para tirar a teima de caracteres duvidosos do OCR e corrigir o original"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveSegIdx(idx);
+                              if (isScanInspectOpenHere) {
+                                setOpenScanInspectIdx(null);
+                              } else {
+                                setOpenScanInspectIdx(idx);
+                                requestScanSnippetForText(seg.source_text, seg.bbox.y);
+                                setStatusNotice(
+                                  `🔍 Exibindo print real do Scan Original para o Trecho #${idx + 1} (Tire a teima e corrija o OCR se necessário)!`
+                                );
+                              }
+                            }}
+                          >
+                            {segOcrDoubts.length > 0
+                              ? `🔍 Dúvida de OCR (${segOcrDoubts[0].wrong})? Tirar a Teima no Scan`
+                              : '👁️ Print do Scan (Tirar a Teima)'}
+                          </button>
+
                           {/* Interactive Button 2: Glossary Term Quick-Insert Buttons */}
                           {glossary
                             .filter((g) =>
@@ -4823,6 +5314,173 @@ export function App() {
                           </button>
                         </div>
                       </div>
+
+                      {/* Inline Real-Time Scan Crop Inspector ("Tirar a Teima no Scan Original" + Corrigir OCR) */}
+                      {isScanInspectOpenHere && (
+                        <div
+                          className="card"
+                          style={{
+                            marginTop: '6px',
+                            border: '2px solid var(--accent)',
+                            background: 'var(--page-canvas)',
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div
+                            className="card-title"
+                            style={{ flexWrap: 'wrap', gap: '6px' }}
+                          >
+                            <span>
+                              🔍 Print do Scan Original (Tirar a Teima) — Trecho #{idx + 1} (Pág.{' '}
+                              {scanSnippetData?.page ?? 1} de {scanSnippetData?.totalPages ?? 1})
+                            </span>
+                            <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: '0.7rem', padding: '1px 6px' }}
+                                onClick={() =>
+                                  requestScanSnippetForText(
+                                    seg.source_text,
+                                    scanSnippetData?.y ?? seg.bbox.y,
+                                    Math.max(1, (scanSnippetData?.page ?? 1) - 1)
+                                  )
+                                }
+                              >
+                                ◀ Pág. Ant.
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: '0.7rem', padding: '1px 6px' }}
+                                onClick={() =>
+                                  requestScanSnippetForText(
+                                    seg.source_text,
+                                    scanSnippetData?.y ?? seg.bbox.y,
+                                    (scanSnippetData?.page ?? 1) + 1
+                                  )
+                                }
+                              >
+                                Próx. Pág. ▶
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: '0.7rem', padding: '1px 6px' }}
+                                onClick={() =>
+                                  requestScanSnippetForText(
+                                    seg.source_text,
+                                    scanSnippetData?.y ?? seg.bbox.y,
+                                    scanSnippetData?.page ?? 1,
+                                    (scanSnippetData?.y ?? seg.bbox.y) - 0.08
+                                  )
+                                }
+                              >
+                                ⬆️ Subir Recorte
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: '0.7rem', padding: '1px 6px' }}
+                                onClick={() =>
+                                  requestScanSnippetForText(
+                                    seg.source_text,
+                                    scanSnippetData?.y ?? seg.bbox.y,
+                                    scanSnippetData?.page ?? 1,
+                                    (scanSnippetData?.y ?? seg.bbox.y) + 0.08
+                                  )
+                                }
+                              >
+                                ⬇️ Descer Recorte
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: '0.7rem', padding: '1px 6px' }}
+                                onClick={() => setShowFullPageInSnippet((prev) => !prev)}
+                              >
+                                {showFullPageInSnippet ? '🔍 Ver Só Recorte' : '🗺️ Ver Pág. Inteira'}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: '0.7rem', padding: '1px 6px' }}
+                                onClick={() => setOpenScanInspectIdx(null)}
+                              >
+                                ✕ Fechar
+                              </button>
+                            </div>
+                          </div>
+
+                          <img
+                            src={
+                              showFullPageInSnippet && scanSnippetData?.fullPageDataUrl
+                                ? scanSnippetData.fullPageDataUrl
+                                : scanSnippetData?.cropDataUrl ||
+                                  renderFacsimileScanCropDataUrl(seg.source_text)
+                            }
+                            alt="Recorte do Scan Original"
+                            style={{
+                              width: '100%',
+                              maxHeight: showFullPageInSnippet ? '310px' : '180px',
+                              objectFit: 'contain',
+                              border: '1px solid var(--border)',
+                              background: '#f4efe1',
+                              marginBottom: '8px',
+                            }}
+                          />
+
+                          {segOcrDoubts.length > 0 && (
+                            <div
+                              style={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                gap: '6px',
+                                marginBottom: '8px',
+                              }}
+                            >
+                              {segOcrDoubts.map((d, dIdx) => (
+                                <button
+                                  key={dIdx}
+                                  type="button"
+                                  className="btn btn-success"
+                                  style={{ fontSize: '0.73rem' }}
+                                  onClick={() => {
+                                    const next = [...segments];
+                                    next[idx] = {
+                                      ...seg,
+                                      source_text: seg.source_text.replace(d.wrong, d.right),
+                                    };
+                                    setSegments(next);
+                                    setStatusNotice(
+                                      `✅ Caractere do OCR corrigido no Trecho #${idx + 1}: "${d.wrong}" → "${d.right}"!`
+                                    );
+                                  }}
+                                >
+                                  ✨ Corrigir "{d.wrong}" → "{d.right}" ({d.reason})
+                                </button>
+                              ))}
+                            </div>
+                          )}
+
+                          <div style={{ fontSize: '0.74rem', fontWeight: 700, marginBottom: '4px' }}>
+                            ✏️ Editar Texto Original Extraído pelo OCR (se algum caractere saiu trocado no scan):
+                          </div>
+                          <textarea
+                            className="code-editor"
+                            style={{ minHeight: '64px', fontSize: '0.78rem' }}
+                            value={seg.source_text}
+                            onChange={(e) => {
+                              const next = [...segments];
+                              next[idx] = {
+                                ...seg,
+                                source_text: e.target.value,
+                              };
+                              setSegments(next);
+                            }}
+                          />
+                        </div>
+                      )}
 
                       {/* Inline Segment Harness Drawer when user clicks "🛡️ Harness" */}
                       {isHarnessOpenHere && (

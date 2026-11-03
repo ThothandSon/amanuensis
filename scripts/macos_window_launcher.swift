@@ -54,6 +54,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
     var lastSelectedPDFURL: URL?
     var lastScannedPageIndex: Int = 0
     var accumulatedPageTexts: [String] = []
+    var cachedPageLineBoxes: [Int: [(text: String, normY: Double, normH: Double)]] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         startRustCoreDaemon()
@@ -89,7 +90,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         webView.uiDelegate = self
         webView.registerForDraggedTypes([.fileURL])
         webView.onFileDropped = { [weak self] fileURL in
-            self?.processSelectedOrDroppedFile(url: fileURL, startPage: 0, batchSize: 10)
+            self?.processSelectedOrDroppedFile(url: fileURL, startPage: 0, batchSize: 0)
         }
         window.contentView?.addSubview(webView)
 
@@ -135,8 +136,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
             cancelOcrRequested = true
         } else if cmd == "scanMorePages" {
             if let url = lastSelectedPDFURL {
-                processSelectedOrDroppedFile(url: url, startPage: lastScannedPageIndex, batchSize: 10)
+                processSelectedOrDroppedFile(url: url, startPage: lastScannedPageIndex, batchSize: 0)
             }
+        } else if cmd == "getScanSnippet" {
+            let dict = (message.body as? [String: Any]) ?? [:]
+            let reqPage = (dict["page"] as? Int) ?? 1
+            let reqY = (dict["y"] as? Double) ?? 0.18
+            let reqH = (dict["height"] as? Double) ?? 0.18
+            let searchText = (dict["text"] as? String) ?? ""
+            renderAndSendScanSnippet(pageOneBased: reqPage, fallbackY: reqY, fallbackH: reqH, searchText: searchText)
         }
     }
 
@@ -156,7 +164,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         panel.beginSheetModal(for: window) { [weak self] response in
             if response == .OK, let firstURL = panel.urls.first {
                 completionHandler(panel.urls)
-                self?.processSelectedOrDroppedFile(url: firstURL, startPage: 0, batchSize: 10)
+                self?.processSelectedOrDroppedFile(url: firstURL, startPage: 0, batchSize: 0)
             } else {
                 completionHandler(nil)
             }
@@ -172,7 +180,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         panel.allowsMultipleSelection = false
         panel.beginSheetModal(for: window) { [weak self] response in
             if response == .OK, let url = panel.url {
-                self?.processSelectedOrDroppedFile(url: url, startPage: 0, batchSize: 10)
+                self?.processSelectedOrDroppedFile(url: url, startPage: 0, batchSize: 0)
             }
         }
     }
@@ -204,6 +212,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
             lastSelectedPDFURL = url
             lastScannedPageIndex = 0
             accumulatedPageTexts = []
+            cachedPageLineBoxes = [:]
         }
 
         // Notify UI immediately that OCR / reading has started
@@ -211,8 +220,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
             "status": "progress",
             "filename": filename,
             "currentPage": startPage,
-            "targetEndPage": startPage + batchSize,
-            "totalPdfPages": max(1, startPage + batchSize),
+            "targetEndPage": max(1, startPage + (batchSize > 0 ? batchSize : 1)),
+            "totalPdfPages": max(1, startPage + (batchSize > 0 ? batchSize : 1)),
             "percent": 4
         ]
         sendNativeFilePayload(startPayload)
@@ -226,7 +235,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
 
             if ext == "pdf", let pdfDoc = PDFDocument(url: url) {
                 pageCount = max(1, pdfDoc.pageCount)
-                let endPage = min(pageCount, startPage + batchSize)
+                // Continuous full-document processing by default (no 10-by-10 page clicking!)
+                let endPage = batchSize > 0 ? min(pageCount, startPage + batchSize) : pageCount
                 let totalInBatch = max(1, endPage - startPage)
 
                 DispatchQueue.main.async {
@@ -252,7 +262,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
                         pageString = embedded
                     } else {
                         usedVisionOcr = true
-                        pageString = self.recognizeTextOnPDFPage(page: page)
+                        pageString = self.recognizeTextOnPDFPage(page: page, pageIndex: idx)
                     }
 
                     if !pageString.isEmpty {
@@ -265,17 +275,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
                     let pct = min(99, max(8, Int((Double(doneInBatch) / Double(totalInBatch)) * 100.0)))
                     let partialJoined = self.accumulatedPageTexts.joined(separator: "\n\n")
 
-                    DispatchQueue.main.async {
-                        self.sendNativeFilePayload([
-                            "status": "progress",
-                            "filename": filename,
-                            "currentPage": actualScannedUpTo,
-                            "targetEndPage": endPage,
-                            "totalPdfPages": pageCount,
-                            "percent": pct,
-                            "usedVisionOcr": usedVisionOcr,
-                            "partialContent": partialJoined
-                        ])
+                    // Throttle UI updates slightly on fast native PDFs so 300+ pages fly smoothly
+                    if usedVisionOcr || doneInBatch == 1 || doneInBatch == totalInBatch || doneInBatch % 5 == 0 {
+                        DispatchQueue.main.async {
+                            self.sendNativeFilePayload([
+                                "status": "progress",
+                                "filename": filename,
+                                "currentPage": actualScannedUpTo,
+                                "targetEndPage": endPage,
+                                "totalPdfPages": pageCount,
+                                "percent": pct,
+                                "usedVisionOcr": usedVisionOcr,
+                                "partialContent": partialJoined
+                            ])
+                        }
                     }
                 }
 
@@ -319,11 +332,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
                     "content": extractedText
                 ]
                 self.sendNativeFilePayload(donePayload)
+                if ext == "pdf" {
+                    self.renderAndSendScanSnippet(pageOneBased: 1, fallbackY: 0.14, fallbackH: 0.22, searchText: "")
+                }
             }
         }
     }
 
-    private func recognizeTextOnPDFPage(page: PDFPage) -> String {
+    private func recognizeTextOnPDFPage(page: PDFPage, pageIndex: Int) -> String {
         let thumbSize = NSSize(width: 1280, height: 1810) // Fast 155 DPI A4 for snappy page-by-page OCR
         let image = page.thumbnail(of: thumbSize, for: .mediaBox)
         guard let tiffData = image.tiffRepresentation,
@@ -333,18 +349,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         }
 
         var recognizedParagraphs: [String] = []
+        var lineBoxes: [(text: String, normY: Double, normH: Double)] = []
         let request = VNRecognizeTextRequest { req, _ in
             guard let observations = req.results as? [VNRecognizedTextObservation] else { return }
             var currentLines: [String] = []
             for obs in observations {
                 if let top = obs.topCandidates(1).first {
-                    currentLines.append(top.string)
+                    let s = top.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !s.isEmpty {
+                        currentLines.append(s)
+                        let topDownY = max(0.0, min(1.0, Double(1.0 - obs.boundingBox.maxY)))
+                        let h = max(0.02, min(1.0, Double(obs.boundingBox.height)))
+                        lineBoxes.append((text: s, normY: topDownY, normH: h))
+                    }
                 }
             }
-            let joinedLines = currentLines
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n")
+            let joinedLines = currentLines.joined(separator: "\n")
             if !joinedLines.isEmpty {
                 recognizedParagraphs.append(joinedLines)
             }
@@ -355,7 +375,161 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
 
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         try? handler.perform([request])
+        DispatchQueue.main.async {
+            self.cachedPageLineBoxes[pageIndex] = lineBoxes
+        }
         return recognizedParagraphs.joined(separator: "\n\n")
+    }
+
+    private func renderAndSendScanSnippet(pageOneBased: Int, fallbackY: Double, fallbackH: Double, searchText: String) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self,
+                  let url = self.lastSelectedPDFURL,
+                  url.pathExtension.lowercased() == "pdf",
+                  let pdfDoc = PDFDocument(url: url),
+                  pdfDoc.pageCount > 0 else {
+                return
+            }
+
+            let totalPages = pdfDoc.pageCount
+            let cleanTokens = searchText
+                .lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 4 }
+
+            var resolvedPageIdx = max(0, min(totalPages - 1, (pageOneBased > 0 ? pageOneBased : 1) - 1))
+            if pageOneBased <= 0 && !cleanTokens.isEmpty && !self.accumulatedPageTexts.isEmpty {
+                var bestIdx = 0
+                var bestScore = -1
+                for (pIdx, pText) in self.accumulatedPageTexts.enumerated() {
+                    let lowerP = pText.lowercased()
+                    var score = 0
+                    for tok in cleanTokens.prefix(12) {
+                        if lowerP.contains(tok) {
+                            score += 1
+                        }
+                    }
+                    if score > bestScore {
+                        bestScore = score
+                        bestIdx = pIdx
+                    }
+                }
+                if bestScore > 0 {
+                    resolvedPageIdx = max(0, min(totalPages - 1, bestIdx))
+                }
+            }
+
+            let pageIdx = resolvedPageIdx
+            guard let page = pdfDoc.page(at: pageIdx) else { return }
+
+            let fullW: CGFloat = 1360
+            let fullH: CGFloat = 1920
+            let fullThumb = page.thumbnail(of: NSSize(width: fullW, height: fullH), for: .mediaBox)
+
+            // Ensure we have Vision line boxes for this page if searchText is provided
+            var boxes = self.cachedPageLineBoxes[pageIdx] ?? []
+            if boxes.isEmpty && !searchText.isEmpty {
+                _ = self.recognizeTextOnPDFPage(page: page, pageIndex: pageIdx)
+                boxes = self.cachedPageLineBoxes[pageIdx] ?? []
+            }
+
+            var targetY = max(0.02, min(0.88, fallbackY))
+            var targetH = max(0.10, min(0.45, fallbackH))
+
+            if !cleanTokens.isEmpty && !boxes.isEmpty {
+                var matchedYs: [Double] = []
+                var matchedBottoms: [Double] = []
+                for b in boxes {
+                    let lowerLine = b.text.lowercased()
+                    var hits = 0
+                    for tok in cleanTokens.prefix(10) {
+                        if lowerLine.contains(tok) {
+                            hits += 1
+                        }
+                    }
+                    if hits >= 1 {
+                        matchedYs.append(b.normY)
+                        matchedBottoms.append(b.normY + b.normH)
+                    }
+                }
+                if let minY = matchedYs.min(), let maxB = matchedBottoms.max() {
+                    let pad = 0.045
+                    targetY = max(0.01, minY - pad)
+                    targetH = max(0.12, min(0.55, (maxB - minY) + pad * 2.2))
+                }
+            }
+
+            // 1. Create cropped high-resolution strip of the target passage on the scan
+            let cropTopPx = CGFloat(targetY) * fullH
+            let cropHeightPx = max(140.0, min(fullH - cropTopPx, CGFloat(targetH) * fullH))
+            // Note: NSImage coordinate system has (0,0) at bottom-left
+            let nsBottomY = max(0.0, fullH - cropTopPx - cropHeightPx)
+            let cropRect = NSRect(x: 0, y: nsBottomY, width: fullW, height: cropHeightPx)
+
+            let croppedImage = NSImage(size: NSSize(width: fullW, height: cropHeightPx))
+            croppedImage.lockFocus()
+            fullThumb.draw(
+                in: NSRect(x: 0, y: 0, width: fullW, height: cropHeightPx),
+                from: cropRect,
+                operation: .copy,
+                fraction: 1.0
+            )
+            croppedImage.unlockFocus()
+
+            // 2. Create annotated full-page preview with a clear highlight rectangle
+            let previewW: CGFloat = 520
+            let previewH: CGFloat = 735
+            let scaleY = previewH / fullH
+            let annotatedFull = NSImage(size: NSSize(width: previewW, height: previewH))
+            annotatedFull.lockFocus()
+            fullThumb.draw(
+                in: NSRect(x: 0, y: 0, width: previewW, height: previewH),
+                from: NSRect(x: 0, y: 0, width: fullW, height: fullH),
+                operation: .copy,
+                fraction: 1.0
+            )
+            let highlightRect = NSRect(
+                x: 8,
+                y: nsBottomY * scaleY,
+                width: previewW - 16,
+                height: max(22.0, cropHeightPx * scaleY)
+            )
+            NSColor(calibratedRed: 0.0, green: 0.33, blue: 0.89, alpha: 0.16).setFill()
+            NSBezierPath(rect: highlightRect).fill()
+            NSColor(calibratedRed: 0.88, green: 0.22, blue: 0.12, alpha: 0.92).setStroke()
+            let borderPath = NSBezierPath(rect: highlightRect)
+            borderPath.lineWidth = 2.5
+            borderPath.stroke()
+            annotatedFull.unlockFocus()
+
+            guard let cropTiff = croppedImage.tiffRepresentation,
+                  let cropRep = NSBitmapImageRep(data: cropTiff),
+                  let cropJpg = cropRep.representation(using: .jpeg, properties: [.compressionFactor: 0.86]),
+                  let fullTiff = annotatedFull.tiffRepresentation,
+                  let fullRep = NSBitmapImageRep(data: fullTiff),
+                  let fullJpg = fullRep.representation(using: .jpeg, properties: [.compressionFactor: 0.78]) else {
+                return
+            }
+
+            let cropBase64 = "data:image/jpeg;base64," + cropJpg.base64EncodedString()
+            let fullBase64 = "data:image/jpeg;base64," + fullJpg.base64EncodedString()
+
+            let snippetPayload: [String: Any] = [
+                "page": pageIdx + 1,
+                "totalPages": totalPages,
+                "y": targetY,
+                "height": targetH,
+                "cropDataUrl": cropBase64,
+                "fullPageDataUrl": fullBase64
+            ]
+
+            DispatchQueue.main.async {
+                guard let data = try? JSONSerialization.data(withJSONObject: snippetPayload, options: []),
+                      let jsonStr = String(data: data, encoding: .utf8) else { return }
+                let js = "if (window.amanuensisReceiveScanSnippet) { window.amanuensisReceiveScanSnippet(\(jsonStr)); }"
+                self.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
     }
 
     private func sendNativeFilePayload(_ payload: [String: Any]) {
