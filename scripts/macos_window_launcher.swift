@@ -145,6 +145,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
             let reqH = (dict["height"] as? Double) ?? 0.18
             let searchText = (dict["text"] as? String) ?? ""
             renderAndSendScanSnippet(pageOneBased: reqPage, fallbackY: reqY, fallbackH: reqH, searchText: searchText)
+        } else if cmd == "pickModelFile" {
+            presentNativeModelPickerPanel()
+        } else if cmd == "scanComputerForModels" {
+            let dict = (message.body as? [String: Any]) ?? [:]
+            let customDir = (dict["directory"] as? String) ?? ""
+            scanDiskForLocalModels(customDirectory: customDir.isEmpty ? nil : customDir)
+        } else if cmd == "pickDirectoryForModelScan" {
+            presentDirectoryPickerForModelScan()
         }
     }
 
@@ -532,6 +540,130 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         }
     }
 
+    @objc func presentNativeModelPickerPanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Apontar Modelo Local Compatível com llama.cpp (.gguf, .bin)"
+        panel.message = "Selecione um arquivo de modelo local .gguf ou .bin baixado no seu computador"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self = self, response == .OK, let url = panel.url else { return }
+            let fm = FileManager.default
+            let attrs = try? fm.attributesOfItem(atPath: url.path)
+            let byteSize = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            let sizeMb = max(1, Int(Double(byteSize) / (1024.0 * 1024.0)))
+            var hasGgufMagic = false
+            if let handle = try? FileHandle(forReadingFrom: url) {
+                let magicData = handle.readData(ofLength: 4)
+                try? handle.close()
+                if let magicStr = String(data: magicData, encoding: .ascii), magicStr == "GGUF" {
+                    hasGgufMagic = true
+                }
+            }
+            let payload: [String: Any] = [
+                "path": url.path,
+                "filename": url.lastPathComponent,
+                "sizeMb": sizeMb,
+                "hasGgufMagic": hasGgufMagic || url.pathExtension.lowercased() == "gguf"
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                  let jsonStr = String(data: data, encoding: .utf8) else { return }
+            let js = "if (window.amanuensisReceivePickedModel) { window.amanuensisReceivePickedModel(\(jsonStr)); }"
+            self.webView?.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    @objc func presentDirectoryPickerForModelScan() {
+        let panel = NSOpenPanel()
+        panel.title = "Escolher Diretório para Varrer Modelos Locais (.gguf, Ollama, LM Studio, HuggingFace)"
+        panel.message = "Escolha uma pasta ou disco externo para procurar modelos de IA locais e diagnosticar duplicatas"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self = self, response == .OK, let url = panel.url else { return }
+            self.scanDiskForLocalModels(customDirectory: url.path)
+        }
+    }
+
+    private func scanDiskForLocalModels(customDirectory: String?) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            let home = fm.homeDirectoryForCurrentUser.path
+            var roots: [String] = []
+            if let custom = customDirectory, !custom.isEmpty {
+                roots.append(custom)
+            } else {
+                roots = [
+                    "\(home)/Library/Application Support/Amanuensis/models",
+                    "\(home)/.lmstudio/models",
+                    "\(home)/.cache/huggingface/hub",
+                    "\(home)/.ollama/models",
+                    "\(home)/Models",
+                    "\(home)/Downloads"
+                ]
+            }
+
+            var foundItems: [[String: Any]] = []
+            let validExts: Set<String> = ["gguf", "bin", "safetensors", "ggml", "part"]
+
+            for root in roots {
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: root, isDirectory: &isDir), isDir.boolValue else { continue }
+                let rootURL = URL(fileURLWithPath: root)
+                guard let enumerator = fm.enumerator(
+                    at: rootURL,
+                    includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+                    options: [.skipsPackageDescendants]
+                ) else { continue }
+
+                var scannedInRoot = 0
+                for case let fileURL as URL in enumerator {
+                    scannedInRoot += 1
+                    if scannedInRoot > 900 || enumerator.level > 4 {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    let ext = fileURL.pathExtension.lowercased()
+                    guard validExts.contains(ext) else { continue }
+                    let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+                    guard values?.isRegularFile == true else { continue }
+                    let bytes = Int64(values?.fileSize ?? 0)
+                    // Ignore tiny config/tokenizer .bin files under 15 MB unless .part
+                    if bytes < 15 * 1024 * 1024 && ext != "part" { continue }
+                    let sizeMb = max(1, Int(Double(bytes) / (1024.0 * 1024.0)))
+                    foundItems.append([
+                        "filename": fileURL.lastPathComponent,
+                        "path": fileURL.path,
+                        "directory": root,
+                        "ext": ext,
+                        "sizeMb": sizeMb
+                    ])
+                }
+            }
+
+            let ramGb = max(4, Int(Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0 * 1024.0)))
+            let cores = ProcessInfo.processInfo.activeProcessorCount
+
+            let responsePayload: [String: Any] = [
+                "scannedDirectories": roots,
+                "customDirectory": customDirectory ?? "",
+                "physicalRamGb": ramGb,
+                "cpuCores": cores,
+                "discoveredFiles": foundItems
+            ]
+
+            DispatchQueue.main.async {
+                guard let data = try? JSONSerialization.data(withJSONObject: responsePayload, options: []),
+                      let jsonStr = String(data: data, encoding: .utf8) else { return }
+                let js = "if (window.amanuensisReceiveDiskModelScan) { window.amanuensisReceiveDiskModelScan(\(jsonStr)); }"
+                self.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+    }
+
     private func sendNativeFilePayload(_ payload: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
               let jsonStr = String(data: data, encoding: .utf8) else { return }
@@ -647,8 +779,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         configMenu.addItem(makeActionItem(title: "🧘 Alternar Modo Zen (Foco Criativo Sem Estímulos)", actionId: "toggle-zen", key: "\\"))
         configMenu.addItem(NSMenuItem.separator())
         configMenu.addItem(makeActionItem(title: "Estação de Tradução (Workbench)", actionId: "tab:workbench", key: "1"))
-        configMenu.addItem(makeActionItem(title: "Bancos de Tradução Auxiliares (TMs)", actionId: "tab:tm", key: "2"))
+        configMenu.addItem(makeActionItem(title: "Bancos Auxiliares & Explorer de Mirrors Abertos (TMs)", actionId: "tab:tm", key: "2"))
+        configMenu.addItem(makeActionItem(title: "🌐 Abrir Explorer de Mirrors de Bancos Abertos (Setup Facilitado)…", actionId: "open-tm-mirrors"))
         configMenu.addItem(makeActionItem(title: "Diretrizes do Projeto (AGENT.md, Glossário & Skills)", actionId: "tab:harness", key: "4"))
+        configMenu.addItem(makeActionItem(title: "Central de Modelos Locais & Diagnóstico de Disco", actionId: "tab:models", key: "5"))
         configMenu.addItem(NSMenuItem.separator())
         configMenu.addItem(makeActionItem(title: "Alterar Área de Especialidade / Projeto…", actionId: "open-onboarding-step2"))
         configMenuItem.submenu = configMenu
@@ -657,7 +791,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         let modelsMenuItem = NSMenuItem()
         mainMenu.addItem(modelsMenuItem)
         let modelsMenu = NSMenu(title: "Modelos")
-        modelsMenu.addItem(makeActionItem(title: "Diagnóstico do Computador & Comparativo de Modelos…", actionId: "open-onboarding-step3"))
+        modelsMenu.addItem(makeActionItem(title: "🎛️ Gerenciador Completo de Modelos (Baixar, Apagar & Caches)…", actionId: "tab:models", key: "5"))
+        modelsMenu.addItem(makeActionItem(title: "🔗 Apontar Modelo Local Compatível com llama.cpp (.gguf)…", actionId: "open-models-custom"))
+        modelsMenu.addItem(makeActionItem(title: "🔍 Varrer Computador por Modelos (Duplicados, Hardware & Confiabilidade)…", actionId: "open-models-scanner"))
+        modelsMenu.addItem(makeActionItem(title: "🧹 Limpar Caches de Modelos (KV Cache, Shards & Órfãos)…", actionId: "purge-model-caches"))
+        modelsMenu.addItem(NSMenuItem.separator())
+        modelsMenu.addItem(makeActionItem(title: "Assistente: Comparativo de Modelos p/ Seu Computador…", actionId: "open-onboarding-step3"))
         modelsMenu.addItem(NSMenuItem.separator())
         modelsMenu.addItem(makeActionItem(title: "Ativar TranslateGemma 4B (Alta Fidelidade Literária/Acadêmica)", actionId: "model:translategemma-4b-q4"))
         modelsMenu.addItem(makeActionItem(title: "Ativar Qwen 2.5 3B (Equilibrado & Tabelas)", actionId: "model:qwen25-3b-instruct-q4"))

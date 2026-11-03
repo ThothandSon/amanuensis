@@ -93,4 +93,73 @@ export interface LocalModelSpec {
   recommended_for: string;
   installed: boolean;
   active: boolean;
+  local_path?: string;
+  cache_size_mb?: number;
+  is_custom_gguf?: boolean;
+  is_downloading?: boolean;
+  download_progress_pct?: number;
+  download_stage_label?: string;
+  task_reliability_badge?: string;
+  hardware_fit_badge?: string;
+}
+
+export type DiskModelDiscoveryStatus =
+  | 'NewUsable'
+  | 'DuplicateWaste'
+  | 'AlreadyRegistered'
+  | 'UnusableOrIncompatible';
+
+export type HardwareRecommendationLevel = 'Recommended' | 'HeavyBorderline' | 'NotRecommended';
+
+export type TaskReliabilityLevel = 'HighReliable' | 'PartialDraftOnly' | 'UnreliableForTask';
+
+export interface DiscoveredDiskModel {
+  id: string;
+  filename: string;
+  path: string;
+  directory: string;
+  duplicate_of_path?: string;
+  ext: string;
+  size_mb: number;
+  cache_waste_mb: number;
+  family: string;
+  quant: string;
+  status: DiskModelDiscoveryStatus;
+  status_label: string;
+  hardware_level: HardwareRecommendationLevel;
+  hardware_verdict: string;
+  est_words_per_sec: number;
+  ram_required_gb: number;
+  reliability_level: TaskReliabilityLevel;
+  reliability_verdict: string;
+  diagnostic_notes: string;
+}
+
+export interface OpenMirrorBankSpec {
+  id: string;
+  name: string;
+  provider_org: string;
+  mirror_url: string;
+  fallback_mirror_url: string;
+  license: string;
+  category:
+    | 'Literatura & Clássicos'
+    | 'Ciências Sociais, História & Política'
+    | 'Acadêmico, Científico & SciELO'
+    | 'Jurídico, Diplomacia & ONU/UE'
+    | 'Jornalismo, Mídia & Legendas'
+    | 'Dicionários, Falsos Cognatos & Regência';
+  source_lang: string;
+  target_lang: string;
+  size_mb: number;
+  entry_count: number;
+  glossary_terms_count: number;
+  description: string;
+  sample_pairs: Array<{ source: string; target: string }>;
+  sample_glossary: Array<{ source_term: string; target_term: string; notes: string }>;
+  installed: boolean;
+  is_installing?: boolean;
+  install_progress_pct?: number;
+  install_stage_label?: string;
+  install_speed_mbps?: string;
 }
