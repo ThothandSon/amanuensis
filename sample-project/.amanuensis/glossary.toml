@@ -1,0 +1,20 @@
+[[terms]]
+source_term = "Translation Memory"
+target_term = "Memória de Tradução"
+notes = "Usar sempre com iniciais maiúsculas em contexto técnico"
+do_not_translate = false
+case_sensitive = false
+
+[[terms]]
+source_term = "context window"
+target_term = "janela de contexto"
+notes = "Termo padrão de LLMs locais"
+do_not_translate = false
+case_sensitive = false
+
+[[terms]]
+source_term = "Amanuensis"
+target_term = "Amanuensis"
+notes = "Nome próprio do software (não traduzir)"
+do_not_translate = true
+case_sensitive = true

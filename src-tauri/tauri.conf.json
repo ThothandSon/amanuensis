@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Amanuensis",
+  "version": "0.1.0",
+  "identifier": "io.amanuensis.workbench",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Amanuensis — Local AI Translation Workbench & Scanned PDF Suite",
+        "width": 1520,
+        "height": 940,
+        "minWidth": 1120,
+        "minHeight": 720,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage", "dmg", "app", "msi", "nsis"],
+    "category": "Productivity",
+    "shortDescription": "Next-gen CAT tool with Auxiliary TMs, Local GGUF Project Harness, and Scanned PDF OCR Suite",
+    "longDescription": "Amanuensis is a cross-platform translation workbench for Linux, macOS, and Windows featuring hybrid SQLite FTS5 + Vector Translation Memories, project-scoped AGENT.md + skills harnesses for small local models, and a scanned PDF to Searchable PDF & Markdown conversion suite."
+  }
+}

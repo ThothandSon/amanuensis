@@ -1,0 +1,11 @@
+[
+  {
+    "id": "rule-001",
+    "pattern_from": "banco de dados de tradução",
+    "preferred_to": "banco de tradução auxiliar",
+    "rationale": "Preferência terminológica aprendida das edições do usuário neste projeto",
+    "occurrences": 3,
+    "active": true,
+    "created_at": "2026-11-03T16:56:35.703189+00:00"
+  }
+]

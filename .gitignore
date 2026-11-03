@@ -1,0 +1,20 @@
+# Rust / Cargo build artifacts
+/target/
+**/target/
+
+# Node / Frontend build artifacts
+/node_modules/
+/dist/
+
+# Packaged binaries & installers (built via ./scripts/build_installer.sh)
+/release/
+
+# macOS / exFAT AppleDouble metadata files
+.DS_Store
+._*
+**/._*
+**/.DS_Store
+
+# Temporary files
+*.log
+*.tmp

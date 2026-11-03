@@ -1,0 +1,68 @@
+{
+  "project_id": "proj-amanuensis-01",
+  "project_name": "Tratado de Tradução Neural Local & OCR",
+  "source_lang": "en-US",
+  "target_lang": "pt-BR",
+  "domain": "Engenharia de IA & Linguística Computacional",
+  "agent_md": "# AGENT.md — Project Translation Harness: Tratado de Tradução Neural Local & OCR\n\n## Identity & Strict Scope\nYou are a deterministic, zero-hallucination local translation engine scoped exclusively to **Tratado de Tradução Neural Local & OCR** (en-US → pt-BR, Domain: `Engenharia de IA & Linguística Computacional`).\n\n## Core Directives\n1. **Zero Hallucination**: Translate ONLY the provided source segment. Never add commentary, explanations, preambles, or unrequested clauses.\n2. **Glossary Supremacy**: Every term listed in `ACTIVE GLOSSARY CONSTRAINTS` MUST be translated using the exact target term specified.\n3. **Auxiliary TM Alignment**: Maintain consistency with the style and phrasing of 80%+ matches from the project's Auxiliary Translation Memories.\n4. **Structural Preservation**: Keep all Markdown formatting (`#`, `**`, tables `|`, footnotes `[^1]`, and inline code/math) intact.\n5. **Register & Voice**: Formal, clear, idiomatic pt-BR appropriate for `Engenharia de IA & Linguística Computacional` texts.\n",
+  "skills": [
+    {
+      "id": "ocr-cleanup",
+      "name": "OCR De-Hyphenation & Scan Artifact Recovery",
+      "description": "Reconstructs words broken by end-of-line hyphens in scanned PDFs and fixes common OCR ligature artifacts.",
+      "trigger": "always",
+      "enabled": true,
+      "content_markdown": "## Skill: OCR Artifact & Hyphenation Recovery\n- Join words split across scan line-breaks (e.g., `trans- lation` → `translation`).\n- Ignore stray OCR margin noise or isolated page numbers unless part of a heading.\n- Preserve footnote markers (`[1]`, `†`, `*`) in their exact syntactic position."
+    },
+    {
+      "id": "markdown-structure",
+      "name": "Markdown Tables, Citations & LaTeX Preservation",
+      "description": "Activates whenever a segment contains GFM tables, academic citations, or mathematical notation.",
+      "trigger": "markdown_or_math",
+      "enabled": true,
+      "content_markdown": "## Skill: Structured Markdown & Formula Preservation\n- Preserve pipe `|` column counts in Markdown tables.\n- Never translate LaTeX math identifiers inside `$...$` or `$$...$$`.\n- Keep bibliographic keys (`[@smith2024]`) untouched."
+    },
+    {
+      "id": "terminology-lock",
+      "name": "Strict Domain Terminology Lock",
+      "description": "Enforces mandatory glossary substitutions and prevents synonym drift across chapters.",
+      "trigger": "glossary_hit",
+      "enabled": true,
+      "content_markdown": "## Skill: Strict Terminology Lock\n- Never substitute a glossary-locked noun phrase with a synonym.\n- Respect `DO_NOT_TRANSLATE` flags for software identifiers, proper nouns, and legal Latinisms."
+    }
+  ],
+  "glossary": [
+    {
+      "source_term": "Translation Memory",
+      "target_term": "Memória de Tradução",
+      "notes": "Usar sempre com iniciais maiúsculas em contexto técnico",
+      "do_not_translate": false,
+      "case_sensitive": false
+    },
+    {
+      "source_term": "context window",
+      "target_term": "janela de contexto",
+      "notes": "Termo padrão de LLMs locais",
+      "do_not_translate": false,
+      "case_sensitive": false
+    },
+    {
+      "source_term": "Amanuensis",
+      "target_term": "Amanuensis",
+      "notes": "Nome próprio do software (não traduzir)",
+      "do_not_translate": true,
+      "case_sensitive": true
+    }
+  ],
+  "learned_rules": [
+    {
+      "id": "rule-001",
+      "pattern_from": "banco de dados de tradução",
+      "preferred_to": "banco de tradução auxiliar",
+      "rationale": "Preferência terminológica aprendida das edições do usuário neste projeto",
+      "occurrences": 3,
+      "active": true,
+      "created_at": "2026-11-03T16:56:35.703189+00:00"
+    }
+  ]
+}
