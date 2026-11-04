@@ -282,4 +282,39 @@ export interface LscSubphraseMatch {
   global_sentence_similarity_pct: number;
 }
 
+export interface ExtractedLexiconItem {
+  source_phrase: string;
+  word_count: number;
+  occurrences: number;
+  segment_indices: number[];
+  suggested_target: string;
+  locked_in_glossary: boolean;
+}
+
+export type FragmentOriginKind =
+  | 'GlossaryLexicon'
+  | 'TmOrLiveCorpusSubsegment'
+  | 'LocalModelGrammarStitch';
+
+export interface AutoAssembleFragment {
+  source_span: string;
+  target_span: string;
+  origin: FragmentOriginKind;
+}
+
+export interface AutoAssembleResult {
+  source_text: string;
+  assembled_target: string;
+  fragments: AutoAssembleFragment[];
+  deterministic_coverage_pct: number;
+}
+
+export interface AutoWriteSuggestion {
+  trigger_prefix: string;
+  completion_full: string;
+  completion_suffix: string;
+  source_origin_label: string;
+}
+
+
 

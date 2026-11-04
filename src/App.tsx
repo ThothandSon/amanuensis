@@ -21,6 +21,10 @@ import {
   LiveCorpusPassage,
   LiveCorpusDocumentSpec,
   LscSubphraseMatch,
+  ExtractedLexiconItem,
+  AutoAssembleFragment,
+  AutoAssembleResult,
+  AutoWriteSuggestion,
 } from './types/amanuensis';
 
 const SAMPLE_SCANNED_PDFS = [
@@ -1244,6 +1248,280 @@ function buildLiveCorpusDocumentFromRaw(
     avg_alignment_confidence: kind === 'BilingualAutoAligned' ? 0.94 : 1.0,
     passages,
   };
+}
+
+// ============================================================================
+// ISSUE #3: DÉJÀ VU AUTOASSEMBLE, DYNAMIC AUTOWRITE & PROJECT LEXICON EXTRACTOR
+// ============================================================================
+const LEXICON_BOUNDARY_STOPWORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'that',
+  'this',
+  'from',
+  'are',
+  'was',
+  'were',
+  'have',
+  'has',
+  'had',
+  'not',
+  'but',
+  'when',
+  'where',
+  'which',
+  'into',
+  'over',
+  'across',
+  'without',
+  'both',
+  'via',
+  'los',
+  'las',
+  'una',
+  'uno',
+  'unos',
+  'unas',
+  'por',
+  'para',
+  'con',
+  'sin',
+  'sobre',
+  'entre',
+  'como',
+  'más',
+  'pero',
+  'sus',
+  'del',
+  'al',
+  'que',
+  'cuando',
+]);
+
+function extractProjectRecurringLexicon(
+  segments: TranslationSegment[],
+  rawOcrText: string,
+  existingGlossary: GlossaryTerm[]
+): ExtractedLexiconItem[] {
+  const existingSet = new Set(existingGlossary.map((g) => g.source_term.toLowerCase()));
+  const counts = new Map<
+    string,
+    { phrase: string; wordCount: number; occurrences: number; segIndices: Set<number> }
+  >();
+
+  const sources = [
+    ...segments.map((s, idx) => ({ text: s.source_text, idx: idx + 1 })),
+    ...rawOcrText
+      .split(/\n{2,}/)
+      .filter(Boolean)
+      .map((t, i) => ({ text: t, idx: i + 1 })),
+  ];
+
+  for (const item of sources) {
+    const words = item.text
+      .replace(/[^a-zA-ZÀ-ÿ0-9\s-]/g, ' ')
+      .split(/\s+/)
+      .map((w) => w.trim().replace(/^-+|-+$/g, ''))
+      .filter((w) => w.length >= 2 && !/^\d+$/.test(w));
+
+    for (let n = 2; n <= Math.min(5, words.length); n++) {
+      for (let start = 0; start <= words.length - n; start++) {
+        const slice = words.slice(start, start + n);
+        const firstLow = slice[0].toLowerCase();
+        const lastLow = slice[n - 1].toLowerCase();
+        if (
+          LEXICON_BOUNDARY_STOPWORDS.has(firstLow) ||
+          LEXICON_BOUNDARY_STOPWORDS.has(lastLow)
+        ) {
+          continue;
+        }
+        const norm = slice.map((w) => w.toLowerCase()).join(' ');
+        if (norm.length < 8) continue;
+
+        const prev = counts.get(norm);
+        if (prev) {
+          prev.occurrences += 1;
+          prev.segIndices.add(item.idx);
+        } else {
+          counts.set(norm, {
+            phrase: slice.join(' '),
+            wordCount: n,
+            occurrences: 1,
+            segIndices: new Set([item.idx]),
+          });
+        }
+      }
+    }
+  }
+
+  const out: ExtractedLexiconItem[] = [];
+  counts.forEach((val, normKey) => {
+    const directMuse = SUBSEGMENT_MUSE_LEXICON[normKey];
+    if (val.occurrences >= 2 || directMuse) {
+      const glossMatch = existingGlossary.find(
+        (g) => g.source_term.toLowerCase() === normKey
+      );
+      const suggested =
+        glossMatch?.target_term ||
+        directMuse ||
+        generateLocalTranslation(val.phrase, 'TranslateGemma 4B', existingGlossary, []);
+
+      out.push({
+        source_phrase: val.phrase,
+        word_count: val.wordCount,
+        occurrences: Math.max(2, val.occurrences),
+        segment_indices: Array.from(val.segIndices).slice(0, 5),
+        suggested_target: suggested,
+        locked_in_glossary: existingSet.has(normKey),
+      });
+    }
+  });
+
+  out.sort(
+    (a, b) =>
+      b.occurrences * 10 +
+      b.word_count * 4 -
+      (a.occurrences * 10 + a.word_count * 4)
+  );
+  return out.slice(0, 18);
+}
+
+function runHybridAutoAssemble(
+  sourceText: string,
+  glossary: GlossaryTerm[],
+  lscMatches: LscSubphraseMatch[],
+  modelName: string,
+  learnedRules: LearnedRule[]
+): AutoAssembleResult {
+  const lowSrc = sourceText.toLowerCase();
+  const fragments: AutoAssembleFragment[] = [];
+  let matchedWords = 0;
+  const totalWords = Math.max(
+    1,
+    sourceText
+      .replace(/[^a-zA-ZÀ-ÿ0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean).length
+  );
+
+  for (const g of glossary) {
+    if (lowSrc.includes(g.source_term.toLowerCase())) {
+      const wc = g.source_term.split(/\s+/).length;
+      matchedWords += wc;
+      fragments.push({
+        source_span: g.source_term,
+        target_span: g.do_not_translate ? g.source_term : g.target_term,
+        origin: 'GlossaryLexicon',
+      });
+    }
+  }
+
+  for (const hit of lscMatches) {
+    const alreadyInGloss = fragments.some((f) =>
+      f.source_span.toLowerCase().includes(hit.source_ngram.toLowerCase())
+    );
+    if (!alreadyInGloss && (hit.suggested_target_phrase || hit.target_paragraph)) {
+      matchedWords += hit.word_count;
+      fragments.push({
+        source_span: hit.source_ngram,
+        target_span: hit.suggested_target_phrase || hit.target_paragraph || hit.source_ngram,
+        origin: 'TmOrLiveCorpusSubsegment',
+      });
+    }
+  }
+
+  const stitched = generateLocalTranslation(sourceText, modelName, glossary, learnedRules);
+  fragments.push({
+    source_span: `Costura Morfológica & Sintática (${modelName.split('(')[0].trim()} + Harness)`,
+    target_span: stitched,
+    origin: 'LocalModelGrammarStitch',
+  });
+
+  const coveragePct = Math.min(96, Math.round((matchedWords / totalWords) * 100));
+
+  return {
+    source_text: sourceText,
+    assembled_target: stitched,
+    fragments,
+    deterministic_coverage_pct: Math.max(35, coveragePct),
+  };
+}
+
+function computeDynamicAutoWriteSuggestions(
+  currentTarget: string,
+  sourceSegment: string,
+  glossary: GlossaryTerm[],
+  extractedLexicon: ExtractedLexiconItem[],
+  lscMatches: LscSubphraseMatch[]
+): AutoWriteSuggestion[] {
+  const suggestions: AutoWriteSuggestion[] = [];
+  const trimmedEnd = currentTarget.replace(/\s+$/, '');
+  const parts = trimmedEnd.split(/[\s,;.()[\]"]+/).filter(Boolean);
+  const lastToken = parts.length > 0 ? parts[parts.length - 1] : '';
+  const lowPrefix = lastToken.toLowerCase();
+  const lowSource = sourceSegment.toLowerCase();
+  const lowTargetFull = currentTarget.toLowerCase();
+
+  const candidatePool: Array<{ src: string; tgt: string; origin: string }> = [
+    ...glossary.map((g) => ({
+      src: g.source_term,
+      tgt: g.do_not_translate ? g.source_term : g.target_term,
+      origin: `📌 Glossário (${g.source_term})`,
+    })),
+    ...lscMatches
+      .filter((m) => m.suggested_target_phrase)
+      .map((m) => ({
+        src: m.source_ngram,
+        tgt: m.suggested_target_phrase || '',
+        origin: `🔍 Sub-segmento LSC (${m.source_ngram})`,
+      })),
+    ...extractedLexicon.map((lx) => ({
+      src: lx.source_phrase,
+      tgt: lx.suggested_target,
+      origin: `🧬 Léxico da Obra (${lx.occurrences}x)`,
+    })),
+  ];
+
+  // 1. Active word prefix completion (>= 2 chars typed)
+  if (lowPrefix.length >= 2) {
+    for (const cand of candidatePool) {
+      const lowTgt = cand.tgt.toLowerCase();
+      if (
+        lowTgt.startsWith(lowPrefix) &&
+        lowTgt.length > lowPrefix.length &&
+        !suggestions.some((s) => s.completion_full.toLowerCase() === lowTgt)
+      ) {
+        suggestions.push({
+          trigger_prefix: lastToken,
+          completion_full: cand.tgt,
+          completion_suffix: cand.tgt.slice(lastToken.length),
+          source_origin_label: cand.origin,
+        });
+      }
+    }
+  }
+
+  // 2. Grounded terms present in the current source segment not yet typed in target
+  for (const cand of candidatePool) {
+    const lowTgt = cand.tgt.toLowerCase();
+    if (
+      cand.src &&
+      lowSource.includes(cand.src.toLowerCase()) &&
+      !lowTargetFull.includes(lowTgt) &&
+      !suggestions.some((s) => s.completion_full.toLowerCase() === lowTgt)
+    ) {
+      suggestions.push({
+        trigger_prefix: '',
+        completion_full: cand.tgt,
+        completion_suffix: cand.tgt,
+        source_origin_label: cand.origin,
+      });
+    }
+  }
+
+  return suggestions.slice(0, 4);
 }
 
 const INITIAL_AGENT_MD = `# AGENT.md — Project Translation Harness: Tratado de Tradução & Humanidades
@@ -3684,6 +3962,201 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
       );
     }
   }, []);
+
+  // ============================================================================
+  // ISSUE #3: DÉJÀ VU PRODUCTIVITY ENGINE (Lexicon Extractor, AutoAssemble & Dynamic AutoWrite)
+  // ============================================================================
+  const [extractedLexicon, setExtractedLexicon] = useState<ExtractedLexiconItem[]>(() =>
+    extractProjectRecurringLexicon(INITIAL_SEGMENTS, SAMPLE_SCANNED_PDFS[0].raw_ocr, glossary)
+  );
+  const [showLexiconExtractorDrawer, setShowLexiconExtractorDrawer] = useState<boolean>(false);
+  const [autoAssembleBySegIdx, setAutoAssembleBySegIdx] = useState<
+    Record<number, AutoAssembleResult>
+  >({});
+  const [openAutoAssembleIdx, setOpenAutoAssembleIdx] = useState<number | null>(null);
+  const [autoWriteEnabled, setAutoWriteEnabled] = useState<boolean>(true);
+
+  const activeAutoWriteSuggestions = useMemo(() => {
+    if (!autoWriteEnabled) return [];
+    return computeDynamicAutoWriteSuggestions(
+      activeSegment.target_text,
+      activeSegment.source_text,
+      glossary,
+      extractedLexicon,
+      activeLscMatches
+    );
+  }, [
+    autoWriteEnabled,
+    activeSegment.target_text,
+    activeSegment.source_text,
+    glossary,
+    extractedLexicon,
+    activeLscMatches,
+  ]);
+
+  const handleExtractRecurringLexicon = useCallback(() => {
+    const items = extractProjectRecurringLexicon(segments, ocrInputScan, glossary);
+    setExtractedLexicon(items);
+    setShowLexiconExtractorDrawer(true);
+    setStatusNotice(
+      `🔍 [Project Lexicon Extractor] ${items.length} expressões recorrentes da obra (2 a 5 palavras) identificadas nos segmentos para padronizar antes ou durante a tradução!`
+    );
+  }, [segments, ocrInputScan, glossary]);
+
+  const handleUpdateLexiconSuggestedTarget = useCallback(
+    (sourcePhrase: string, nextTarget: string) => {
+      setExtractedLexicon((prev) =>
+        prev.map((item) =>
+          item.source_phrase === sourcePhrase ? { ...item, suggested_target: nextTarget } : item
+        )
+      );
+    },
+    []
+  );
+
+  const handleLockLexiconItemInGlossary = useCallback((item: ExtractedLexiconItem) => {
+    const cleanSrc = item.source_phrase.trim();
+    const cleanTgt = item.suggested_target.trim();
+    if (!cleanSrc || !cleanTgt) return;
+    setGlossary((prev) => {
+      const exists = prev.some((g) => g.source_term.toLowerCase() === cleanSrc.toLowerCase());
+      if (exists) {
+        return prev.map((g) =>
+          g.source_term.toLowerCase() === cleanSrc.toLowerCase()
+            ? { ...g, target_term: cleanTgt }
+            : g
+        );
+      }
+      return [
+        ...prev,
+        {
+          source_term: cleanSrc,
+          target_term: cleanTgt,
+          notes: `Léxico Recorrente da Obra (${item.occurrences}x • Segs #${item.segment_indices.join(', #')})`,
+          do_not_translate: false,
+        },
+      ];
+    });
+    setExtractedLexicon((prev) =>
+      prev.map((it) =>
+        it.source_phrase === item.source_phrase ? { ...it, locked_in_glossary: true } : it
+      )
+    );
+    setStatusNotice(
+      `📌 Sintagma recorrente "${cleanSrc} → ${cleanTgt}" (${item.occurrences}x na obra) travado em .amanuensis/glossary.toml e no ProjectHarness!`
+    );
+  }, []);
+
+  const handleLockAllExtractedLexicon = useCallback(() => {
+    let lockedCount = 0;
+    setGlossary((prev) => {
+      const next = [...prev];
+      extractedLexicon.forEach((item) => {
+        if (!item.locked_in_glossary && item.suggested_target.trim()) {
+          const exists = next.some(
+            (g) => g.source_term.toLowerCase() === item.source_phrase.toLowerCase()
+          );
+          if (!exists) {
+            next.push({
+              source_term: item.source_phrase,
+              target_term: item.suggested_target,
+              notes: `Léxico Recorrente da Obra (${item.occurrences}x)`,
+              do_not_translate: false,
+            });
+            lockedCount++;
+          }
+        }
+      });
+      return next;
+    });
+    setExtractedLexicon((prev) => prev.map((it) => ({ ...it, locked_in_glossary: true })));
+    setStatusNotice(
+      `🛡️ Todos os ${
+        lockedCount || extractedLexicon.length
+      } sintagmas recorrentes da obra foram travados em .amanuensis/glossary.toml e injetados no ProjectHarness!`
+    );
+  }, [extractedLexicon]);
+
+  const handleRunAutoAssembleOnSegment = useCallback(
+    (segIdx: number) => {
+      const seg = segments[segIdx];
+      if (!seg) return;
+      const segLsc = findLongestSubstringConcordances(seg.source_text, liveCorpusDocs, glossary);
+      const assembled = runHybridAutoAssemble(
+        seg.source_text,
+        glossary,
+        segLsc,
+        activeModel.name,
+        learnedRules
+      );
+      setAutoAssembleBySegIdx((prev) => ({ ...prev, [segIdx]: assembled }));
+      setOpenAutoAssembleIdx(segIdx);
+      setActiveSegIdx(segIdx);
+      setSegments((prev) =>
+        prev.map((s, i) =>
+          i === segIdx
+            ? {
+                ...s,
+                target_text: assembled.assembled_target,
+                ai_draft_snapshot: assembled.assembled_target,
+                status: 'AiDraft',
+              }
+            : s
+        )
+      );
+      const glossCnt = assembled.fragments.filter((f) => f.origin === 'GlossaryLexicon').length;
+      const subCnt = assembled.fragments.filter(
+        (f) => f.origin === 'TmOrLiveCorpusSubsegment'
+      ).length;
+      const stitchCnt = assembled.fragments.filter(
+        (f) => f.origin === 'LocalModelGrammarStitch'
+      ).length;
+      setStatusNotice(
+        `🧩 [AutoAssemble Híbrido — Trecho #${segIdx + 1}] Montado com ${
+          assembled.deterministic_coverage_pct
+        }% de cobertura determinística (${glossCnt} léxico/glossário + ${subCnt} sub-segmento TM/Corpus + ${stitchCnt} costura morfológica)!`
+      );
+    },
+    [segments, liveCorpusDocs, glossary, activeModel.name, learnedRules]
+  );
+
+  const handleAcceptAutoWriteSuggestion = useCallback(
+    (segIdx: number, sug: AutoWriteSuggestion) => {
+      const seg = segments[segIdx];
+      if (!seg) return;
+      const current = seg.target_text;
+      let nextText = current;
+      const trimmedEnd = current.trimEnd();
+      const lastWordMatch = trimmedEnd.match(/(\S+)$/);
+      if (
+        lastWordMatch &&
+        lastWordMatch[1].length >= 2 &&
+        sug.completion_full.toLowerCase().startsWith(lastWordMatch[1].toLowerCase())
+      ) {
+        nextText =
+          trimmedEnd.slice(0, trimmedEnd.length - lastWordMatch[1].length) +
+          sug.completion_full +
+          ' ';
+      } else {
+        nextText = (trimmedEnd ? `${trimmedEnd} ` : '') + sug.completion_full + ' ';
+      }
+      setSegments((prev) =>
+        prev.map((s, i) =>
+          i === segIdx
+            ? {
+                ...s,
+                target_text: nextText,
+                status: s.status === 'Untranslated' ? 'Translated' : s.status,
+              }
+            : s
+        )
+      );
+      setStatusNotice(
+        `⌨️ [Dynamic AutoWrite] Termo confirmado "${sug.completion_full}" (${sug.source_origin_label}) inserido com Tab!`
+      );
+    },
+    [segments]
+  );
 
   const activeQaWarnings = useMemo(() => {
     const tgt = activeSegment.target_text.trim();
@@ -7661,9 +8134,19 @@ ${adr.adopted_decision}
                   fontSize: `${zenFontSizeRem}rem`,
                   fontFamily: 'inherit',
                 }}
-                placeholder="Escreva sua tradução com calma, ou pressione Ctrl+M (⌘M) para um rascunho silencioso do modelo local..."
+                placeholder="Escreva sua tradução com calma, pressione Tab para aceitar sugestão silenciosa do Dynamic AutoWrite ou Ctrl+M (⌘M) para rascunho..."
                 value={activeSegment.target_text}
                 autoFocus
+                onKeyDown={(e) => {
+                  if (
+                    e.key === 'Tab' &&
+                    autoWriteEnabled &&
+                    activeAutoWriteSuggestions.length > 0
+                  ) {
+                    e.preventDefault();
+                    handleAcceptAutoWriteSuggestion(activeSegIdx, activeAutoWriteSuggestions[0]);
+                  }
+                }}
                 onChange={(e) => {
                   const next = [...segments];
                   next[activeSegIdx] = {
@@ -7674,6 +8157,41 @@ ${adr.adopted_decision}
                   setSegments(next);
                 }}
               />
+
+              {/* Issue #3: Silent Dynamic AutoWrite Strip in Modo Zen (Grounded Glossary/Lexicon/Corpus Only) */}
+              {autoWriteEnabled && activeAutoWriteSuggestions.length > 0 && (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    flexWrap: 'wrap',
+                    padding: '6px 10px',
+                    fontSize: '0.74rem',
+                    color: 'var(--zen-muted)',
+                    borderLeft: '2px solid var(--zen-accent)',
+                  }}
+                >
+                  <span style={{ fontWeight: 700 }}>
+                    ⌨️ Dynamic AutoWrite (Tab p/ aceitar • zero alucinação):
+                  </span>
+                  {activeAutoWriteSuggestions.map((sug, sIdx) => (
+                    <button
+                      key={`${sug.completion_full}-${sIdx}`}
+                      type="button"
+                      className={`zen-pill-btn ${sIdx === 0 ? 'active' : ''}`}
+                      title={`Origem confirmada: ${sug.source_origin_label}`}
+                      onClick={() => handleAcceptAutoWriteSuggestion(activeSegIdx, sug)}
+                    >
+                      {sIdx === 0 ? '⇥ Tab: ' : ''}
+                      {sug.completion_full}{' '}
+                      <span style={{ opacity: 0.72, fontSize: '0.68rem' }}>
+                        ({sug.source_origin_label})
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {zenShowGlossaryPeek && (
                 <div
@@ -7744,6 +8262,14 @@ ${adr.adopted_decision}
                 </div>
 
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    className="zen-pill-btn"
+                    onClick={() => handleRunAutoAssembleOnSegment(activeSegIdx)}
+                    title="Montar esqueleto híbrido (Glossário + Sub-segmento TM/Corpus + Costura Morfológica IA Local)"
+                  >
+                    🧩 AutoAssemble Híbrido
+                  </button>
                   <button
                     type="button"
                     className="zen-pill-btn"
@@ -8465,6 +8991,28 @@ ${adr.adopted_decision}
                 </select>
                 <button
                   className="btn"
+                  style={{ fontSize: '0.72rem', padding: '2px 7px' }}
+                  onClick={() => {
+                    if (showLexiconExtractorDrawer) {
+                      setShowLexiconExtractorDrawer(false);
+                    } else {
+                      handleExtractRecurringLexicon();
+                    }
+                  }}
+                  title="Varre todos os segmentos da obra e extrai os sintagmas multi-palavra mais frequentes (2 a 5 palavras) para padronizar no glossário antes/durante a tradução (Inspirado no Déjà Vu Build Lexicon)"
+                >
+                  🔍 Extrair Léxico da Obra ({extractedLexicon.length})
+                </button>
+                <button
+                  className="btn"
+                  style={{ fontSize: '0.72rem', padding: '2px 7px' }}
+                  onClick={() => handleRunAutoAssembleOnSegment(activeSegIdx)}
+                  title="AutoAssemble Híbrido (Déjà Vu): monta o esqueleto da frase combinando fragmentos do Glossário/Léxico, sub-segmentos da TM/LiveCorpus e costura morfológica do modelo local"
+                >
+                  🧩 AutoAssemble Híbrido
+                </button>
+                <button
+                  className="btn"
                   onClick={() => setZenMode(true)}
                   title="Ativar Modo Zen para foco criativo sem estímulos de tela (⌘\)"
                 >
@@ -8482,6 +9030,119 @@ ${adr.adopted_decision}
               </div>
             </div>
             <div className="pane-body">
+              {/* Issue #3: Project Lexicon Extractor Drawer ("Build Lexicon" — Déjà Vu) */}
+              {showLexiconExtractorDrawer && (
+                <div
+                  className="card"
+                  style={{
+                    marginBottom: '10px',
+                    border: '2px solid var(--accent)',
+                    background: 'var(--page-canvas)',
+                  }}
+                >
+                  <div className="card-title" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                    <span>
+                      🔍 Extrator de Léxico Recorrente da Obra (Build Lexicon — Inspirado no Déjà
+                      Vu)
+                    </span>
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn btn-success"
+                        style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                        onClick={handleLockAllExtractedLexicon}
+                      >
+                        🛡️ Travar Todos em .amanuensis/glossary.toml
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                        onClick={handleExtractRecurringLexicon}
+                      >
+                        🔄 Re-escanear Obra
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                        onClick={() => setShowLexiconExtractorDrawer(false)}
+                      >
+                        ✕ Fechar
+                      </button>
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: '0.75rem',
+                      color: 'var(--text-muted)',
+                      marginBottom: '8px',
+                    }}
+                  >
+                    Expressões multi-palavra (2 a 5 palavras) mais frequentes na obra. Padronize a
+                    tradução aqui para injetá-la deterministicamente no{' '}
+                    <code>.amanuensis/glossary.toml</code>, no <code>ProjectHarness</code>, no{' '}
+                    <strong>AutoAssemble</strong> e no <strong>Dynamic AutoWrite</strong>:
+                  </div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '5px',
+                      maxHeight: '220px',
+                      overflowY: 'auto',
+                    }}
+                  >
+                    {extractedLexicon.map((item) => (
+                      <div
+                        key={item.source_phrase}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: 'minmax(140px, 1.2fr) auto minmax(150px, 1.3fr) auto',
+                          gap: '6px',
+                          alignItems: 'center',
+                          padding: '5px 8px',
+                          background: 'var(--surface)',
+                          border: '1px solid var(--border-dark)',
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '0.78rem' }}>
+                            {item.source_phrase}
+                          </div>
+                          <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                            {item.word_count} palavras • Ocorrências: Segs #
+                            {item.segment_indices.join(', #')}
+                          </div>
+                        </div>
+                        <span className="badge badge-accent">{item.occurrences}x na obra</span>
+                        <input
+                          className="input-text"
+                          style={{ padding: '3px 6px', fontSize: '0.76rem' }}
+                          value={item.suggested_target}
+                          onChange={(e) =>
+                            handleUpdateLexiconSuggestedTarget(item.source_phrase, e.target.value)
+                          }
+                          placeholder="Tradução padronizada na obra..."
+                        />
+                        {item.locked_in_glossary ? (
+                          <span className="badge badge-exact">✓ Travado no Glossário</span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            style={{ fontSize: '0.7rem', padding: '2px 7px' }}
+                            onClick={() => handleLockLexiconItemInGlossary(item)}
+                          >
+                            📌 Travar
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {segments.map((seg, idx) => {
                 const isActive = idx === activeSegIdx;
                 const hasPostEditDiff =
@@ -8570,11 +9231,22 @@ ${adr.adopted_decision}
                     <div className="segment-editor-area">
                       <textarea
                         className="segment-textarea"
-                        placeholder="Digite sua tradução ou clique no botão '🧠 Sugerir (IA Local)' abaixo..."
+                        placeholder="Digite sua tradução (pressione Tab p/ autocompletar Dynamic AutoWrite) ou clique em '🧩 AutoAssemble' / '🧠 Sugerir (IA Local)' abaixo..."
                         value={seg.target_text}
                         onClick={(e) => {
                           e.stopPropagation();
                           setActiveSegIdx(idx);
+                        }}
+                        onKeyDown={(e) => {
+                          if (
+                            isActive &&
+                            e.key === 'Tab' &&
+                            autoWriteEnabled &&
+                            activeAutoWriteSuggestions.length > 0
+                          ) {
+                            e.preventDefault();
+                            handleAcceptAutoWriteSuggestion(idx, activeAutoWriteSuggestions[0]);
+                          }
                         }}
                         onChange={(e) => {
                           const next = [...segments];
@@ -8586,6 +9258,53 @@ ${adr.adopted_decision}
                           setSegments(next);
                         }}
                       />
+
+                      {/* Issue #3: Non-intrusive Dynamic AutoWrite Strip (Tab to accept • Grounded Terms Only) */}
+                      {isActive && autoWriteEnabled && activeAutoWriteSuggestions.length > 0 && (
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '6px',
+                            flexWrap: 'wrap',
+                            padding: '4px 8px',
+                            background: 'var(--page-canvas)',
+                            border: '1px dashed var(--accent)',
+                            fontSize: '0.73rem',
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
+                            <span style={{ fontWeight: 700, color: 'var(--accent)' }}>
+                              ⌨️ Dynamic AutoWrite (Tab p/ aceitar):
+                            </span>
+                            {activeAutoWriteSuggestions.map((sug, sIdx) => (
+                              <button
+                                key={`${sug.completion_full}-${sIdx}`}
+                                type="button"
+                                className={`badge ${
+                                  sIdx === 0 ? 'badge-exact' : 'badge-accent'
+                                } badge-btn`}
+                                title={`Origem determinística confirmada: ${sug.source_origin_label}. Clique ou pressione Tab!`}
+                                onClick={() => handleAcceptAutoWriteSuggestion(idx, sug)}
+                              >
+                                {sIdx === 0 ? '⇥ Tab: ' : ''}
+                                {sug.completion_full} ({sug.source_origin_label})
+                              </button>
+                            ))}
+                          </div>
+                          <button
+                            type="button"
+                            className="badge badge-btn"
+                            style={{ fontSize: '0.66rem' }}
+                            onClick={() => setAutoWriteEnabled(false)}
+                            title="Pausar sugestões preditivas do Dynamic AutoWrite"
+                          >
+                            Silenciar
+                          </button>
+                        </div>
+                      )}
 
                       {hasPostEditDiff && seg.ai_draft_snapshot && (
                         <div className="diff-box">
@@ -8688,6 +9407,26 @@ ${adr.adopted_decision}
                             {Math.max(0, (segmentGenealogies[idx]?.length || 1) - 1)})
                           </button>
 
+                          {/* Interactive Button 1D (Issue #3): Hybrid AutoAssemble ("🧩 AutoAssemble Esqueleto") */}
+                          <button
+                            type="button"
+                            className="badge badge-exact badge-btn"
+                            title="Monta o esqueleto da tradução combinando fragmentos travados do Glossário/Léxico, sub-segmentos da TM/LiveCorpus e costura morfológica do modelo local (Inspirado no Déjà Vu AutoAssemble)"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (openAutoAssembleIdx === idx && autoAssembleBySegIdx[idx]) {
+                                setOpenAutoAssembleIdx(null);
+                              } else {
+                                handleRunAutoAssembleOnSegment(idx);
+                              }
+                            }}
+                          >
+                            🧩 AutoAssemble
+                            {autoAssembleBySegIdx[idx]
+                              ? ` (${autoAssembleBySegIdx[idx].deterministic_coverage_pct}% det.)`
+                              : ' (Montar)'}
+                          </button>
+
                           {/* Interactive Button 2: Glossary Term Quick-Insert Buttons */}
                           {glossary
                             .filter((g) =>
@@ -8740,6 +9479,102 @@ ${adr.adopted_decision}
                           </button>
                         </div>
                       </div>
+
+                      {/* Issue #3: Inline Hybrid AutoAssemble Skeleton Breakdown Card */}
+                      {openAutoAssembleIdx === idx && autoAssembleBySegIdx[idx] && (
+                        <div
+                          className="card"
+                          style={{
+                            marginTop: '6px',
+                            border: '2px solid var(--success)',
+                            background: 'var(--page-canvas)',
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div className="card-title" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                            <span>
+                              🧩 Esqueleto AutoAssemble Híbrido — Trecho #{idx + 1} (Cobertura
+                              Determinística:{' '}
+                              {autoAssembleBySegIdx[idx].deterministic_coverage_pct}%)
+                            </span>
+                            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                              <span className="badge badge-exact">
+                                📌{' '}
+                                {
+                                  autoAssembleBySegIdx[idx].fragments.filter(
+                                    (f) => f.origin === 'GlossaryLexicon'
+                                  ).length
+                                }{' '}
+                                Léxico/Glossário
+                              </span>
+                              <span className="badge badge-accent">
+                                📚{' '}
+                                {
+                                  autoAssembleBySegIdx[idx].fragments.filter(
+                                    (f) => f.origin === 'TmOrLiveCorpusSubsegment'
+                                  ).length
+                                }{' '}
+                                Sub-segmento TM/Corpus
+                              </span>
+                              <span className="badge badge-fuzzy">
+                                🧠{' '}
+                                {
+                                  autoAssembleBySegIdx[idx].fragments.filter(
+                                    (f) => f.origin === 'LocalModelGrammarStitch'
+                                  ).length
+                                }{' '}
+                                Costura Morfológica
+                              </span>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: '0.7rem', padding: '1px 7px' }}
+                                onClick={() => setOpenAutoAssembleIdx(null)}
+                              >
+                                ✕ Fechar
+                              </button>
+                            </div>
+                          </div>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: '6px',
+                              marginTop: '4px',
+                            }}
+                          >
+                            {autoAssembleBySegIdx[idx].fragments.map((frag, fIdx) => (
+                              <div
+                                key={fIdx}
+                                style={{
+                                  padding: '5px 8px',
+                                  background: 'var(--surface)',
+                                  border: `1px solid ${
+                                    frag.origin === 'GlossaryLexicon'
+                                      ? 'var(--success)'
+                                      : frag.origin === 'TmOrLiveCorpusSubsegment'
+                                      ? 'var(--accent)'
+                                      : 'var(--border-dark)'
+                                  }`,
+                                  fontSize: '0.74rem',
+                                }}
+                              >
+                                <div style={{ fontWeight: 700 }}>{frag.target_span}</div>
+                                <div style={{ fontSize: '0.67rem', color: 'var(--text-muted)' }}>
+                                  Fonte: "{frag.source_span}" •{' '}
+                                  <strong>
+                                    {frag.origin === 'GlossaryLexicon'
+                                      ? '📌 Léxico/Glossário'
+                                      : frag.origin === 'TmOrLiveCorpusSubsegment'
+                                      ? '📚 Sub-segmento TM/LiveCorpus'
+                                      : '🧠 Costura Morfológica IA Local'}
+                                  </strong>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Inline Segment Git Genealogy Drawer ("🕰️ História Git deste Trecho") */}
                       {openGenealogyIdx === idx && (

@@ -1,3 +1,4 @@
+pub mod dejavu_assemble;
 pub mod git_story;
 pub mod harness;
 pub mod livedocs;
@@ -867,5 +868,99 @@ Maio francês: quando os operários e estudantes desafiaram o poder em 1968 (Rev
         assert!(saved.exists());
         assert!(saved.to_string_lossy().contains(".amanuensis/corpus/LIVECORPUS_MANIFEST.json"));
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_project_lexicon_extractor_finds_recurring_multiword_syntagms() {
+        use crate::dejavu_assemble::DejaVuProductivityEngine;
+        use std::collections::HashMap;
+
+        let segments = vec![
+            "Los comités de huelga organizaron la ocupación de fábricas en mayo de 1968.".to_string(),
+            "Durante las asambleas, los comités de huelga defendieron el poder estudiantil y la ocupación de fábricas.".to_string(),
+            "El poder estudiantil convergió con los comités de huelga en París.".to_string(),
+        ];
+
+        let mut known = HashMap::new();
+        known.insert("comités de huelga".to_string(), "comitês de greve".to_string());
+        known.insert("ocupación de fábricas".to_string(), "ocupação de fábricas".to_string());
+        known.insert("poder estudiantil".to_string(), "poder estudantil".to_string());
+
+        let extracted = DejaVuProductivityEngine::extract_recurring_lexicon(&segments, 2, 5, &known);
+        assert!(!extracted.is_empty());
+
+        let top = extracted
+            .iter()
+            .find(|e| e.source_phrase == "comités de huelga")
+            .expect("Expected 'comités de huelga' to be extracted");
+        assert_eq!(top.occurrences, 3);
+        assert_eq!(top.suggested_target, "comitês de greve");
+    }
+
+    #[test]
+    fn test_hybrid_auto_assemble_combines_glossary_subsegments_and_stitching() {
+        use crate::dejavu_assemble::{DejaVuProductivityEngine, FragmentOrigin};
+
+        let source = "Small local language models achieve remarkable translation fidelity when constrained by a project-specific harness and an auxiliary Translation Memory.";
+        let glossary = vec![
+            ("Translation Memory".to_string(), "Memória de Tradução".to_string()),
+            ("harness".to_string(), "harness".to_string()),
+        ];
+        let subsegments = vec![
+            (
+                "small local language models".to_string(),
+                "modelos de linguagem locais compactos".to_string(),
+            ),
+            (
+                "remarkable translation fidelity".to_string(),
+                "notável fidelidade de tradução".to_string(),
+            ),
+        ];
+        let stitched = "Modelos de linguagem locais compactos alcançam notável fidelidade de tradução quando restritos por um harness específico do projeto e uma Memória de Tradução auxiliar.";
+
+        let res = DejaVuProductivityEngine::auto_assemble_segment(
+            source,
+            &glossary,
+            &subsegments,
+            stitched,
+        );
+        assert!(res.deterministic_coverage_pct >= 40.0);
+        assert!(res
+            .fragments
+            .iter()
+            .any(|f| f.origin == FragmentOrigin::GlossaryLexicon));
+        assert!(res
+            .fragments
+            .iter()
+            .any(|f| f.origin == FragmentOrigin::TmOrLiveCorpusSubsegment));
+        assert!(res
+            .fragments
+            .iter()
+            .any(|f| f.origin == FragmentOrigin::LocalModelGrammarStitch));
+    }
+
+    #[test]
+    fn test_dynamic_autowrite_suggests_only_grounded_glossary_and_confirmed_terms() {
+        use crate::dejavu_assemble::DejaVuProductivityEngine;
+
+        let glossary = vec![
+            ("Translation Memory".to_string(), "Memória de Tradução".to_string()),
+            (
+                "welfare state".to_string(),
+                "Estado de Bem-Estar Social".to_string(),
+            ),
+        ];
+        let confirmed = vec!["responsabilização histórica".to_string()];
+
+        // User typed "Memó" -> should suggest "Memória de Tradução" (suffix "ria de Tradução")
+        let sugs = DejaVuProductivityEngine::compute_dynamic_autowrite_suggestions(
+            "O sistema utiliza uma Memó",
+            "The system uses a Translation Memory in welfare state research.",
+            &glossary,
+            &confirmed,
+        );
+        assert!(!sugs.is_empty());
+        assert_eq!(sugs[0].completion_full, "Memória de Tradução");
+        assert_eq!(sugs[0].completion_suffix, "ria de Tradução");
     }
 }
