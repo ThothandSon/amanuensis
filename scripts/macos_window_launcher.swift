@@ -163,6 +163,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
             let dict = (message.body as? [String: Any]) ?? [:]
             let role = (dict["role"] as? String) ?? "AuthorPriorWork"
             presentLiveCorpusFilePickerPanel(role: role)
+        } else if cmd == "exportBilingualDocx" {
+            let dict = (message.body as? [String: Any]) ?? [:]
+            exportBilingualReviewDocx(dict: dict)
+        } else if cmd == "importBilingualDocx" {
+            presentBilingualReviewDocxImportPanel()
         }
     }
 
@@ -242,6 +247,76 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
                     guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
                           let jsonStr = String(data: data, encoding: .utf8) else { return }
                     let js = "if (window.amanuensisReceiveLiveCorpusFile) { window.amanuensisReceiveLiveCorpusFile(\(jsonStr)); }"
+                    self?.webView?.evaluateJavaScript(js, completionHandler: nil)
+                }
+            }
+        }
+    }
+
+    func exportBilingualReviewDocx(dict: [String: Any]) {
+        let filenameBase = (dict["filename"] as? String) ?? "Revisao_Bilingue_Amanuensis"
+        let htmlContent = (dict["htmlContent"] as? String) ?? ""
+        guard !htmlContent.isEmpty else { return }
+
+        let savePanel = NSSavePanel()
+        savePanel.title = "Exportar Tabela de Revisão Bilíngue em Word (.docx)"
+        savePanel.message = "Escolha onde salvar o arquivo Word (.docx) com duas colunas (Original | Tradução | Notas) para enviar à revisora/editor"
+        savePanel.nameFieldStringValue = filenameBase.hasSuffix(".docx") ? filenameBase : "\(filenameBase).docx"
+        savePanel.canCreateDirectories = true
+
+        savePanel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let targetURL = savePanel.url else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let tmpHtmlURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("amanuensis_bilingual_\(Int(Date().timeIntervalSince1970)).html")
+                try? htmlContent.write(to: tmpHtmlURL, atomically: true, encoding: .utf8)
+
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/textutil")
+                proc.arguments = ["-convert", "docx", "-output", targetURL.path, tmpHtmlURL.path]
+                try? proc.run()
+                proc.waitUntilExit()
+                try? FileManager.default.removeItem(at: tmpHtmlURL)
+
+                let payload: [String: Any] = [
+                    "savedPath": targetURL.path,
+                    "filename": targetURL.lastPathComponent
+                ]
+                DispatchQueue.main.async {
+                    guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                          let jsonStr = String(data: data, encoding: .utf8) else { return }
+                    let js = "if (window.amanuensisReceiveExportedDocxInfo) { window.amanuensisReceiveExportedDocxInfo(\(jsonStr)); }"
+                    self?.webView?.evaluateJavaScript(js, completionHandler: nil)
+                }
+            }
+        }
+    }
+
+    func presentBilingualReviewDocxImportPanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Reimportar Documento Word (.docx) de Revisão Bilíngue"
+        panel.message = "Selecione o arquivo .docx, .doc, .html ou .md devolvido pela revisora/preparadora de texto"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let ext = url.pathExtension.lowercased()
+                var content = ""
+                if ["docx", "doc", "rtf", "odt"].contains(ext) {
+                    content = self?.extractWordOrRichText(url: url) ?? ""
+                } else {
+                    content = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+                }
+                let payload: [String: Any] = [
+                    "filename": url.lastPathComponent,
+                    "path": url.path,
+                    "content": content
+                ]
+                DispatchQueue.main.async {
+                    guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                          let jsonStr = String(data: data, encoding: .utf8) else { return }
+                    let js = "if (window.amanuensisReceiveBilingualReviewDoc) { window.amanuensisReceiveBilingualReviewDoc(\(jsonStr)); }"
                     self?.webView?.evaluateJavaScript(js, completionHandler: nil)
                 }
             }

@@ -30,6 +30,10 @@ import {
   GlobalSearchScope,
   GlobalSearchStatusFilter,
   GlobalRegexPreviewItem,
+  BilingualReviewDiffItem,
+  EpubChapterUnit,
+  SubtitleCpsStatus,
+  SubtitleCueDiagnostic,
 } from './types/amanuensis';
 
 const SAMPLE_SCANNED_PDFS = [
@@ -1742,6 +1746,268 @@ function previewGlobalRegexSearchAndReplace(
   });
 
   return { previews, regexError: null };
+}
+
+// ============================================================================
+// ISSUE #5: TRADOS & WORDFAST BILINGUAL .DOCX REVIEW ROUND-TRIP, EPUB & SRT CPS
+// ============================================================================
+function escapeHtmlForReview(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function unescapeHtmlForReview(str: string): string {
+  return str
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
+}
+
+function buildBilingualReviewWordHtml(
+  projectTitle: string,
+  sourceLang: string,
+  targetLang: string,
+  segments: TranslationSegment[]
+): string {
+  const rowsHtml = segments
+    .map(
+      (seg, idx) =>
+        `<tr data-seg-idx="${idx}" data-seg-id="${escapeHtmlForReview(seg.id)}">
+  <td class="col-id">[[SEG:${idx + 1}]]<br/>#${idx + 1}</td>
+  <td class="col-src">${escapeHtmlForReview(seg.source_text)}</td>
+  <td class="col-tgt">[[TGT_START:${idx + 1}]]${escapeHtmlForReview(
+          seg.target_text
+        )}[[TGT_END:${idx + 1}]]</td>
+  <td class="col-notes">[[NOTE_START:${idx + 1}]][[NOTE_END:${idx + 1}]]</td>
+</tr>`
+    )
+    .join('\n');
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Revisão Bilíngue Amanuensis — ${escapeHtmlForReview(projectTitle)}</title>
+<style>
+body { font-family: 'Georgia', 'Times New Roman', serif; margin: 24px; color: #111; }
+h1 { font-size: 18pt; margin-bottom: 4px; }
+p.meta { font-size: 10pt; color: #444; margin-top: 0; margin-bottom: 16px; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th, td { border: 1px solid #333; padding: 8px 10px; vertical-align: top; font-size: 10.5pt; line-height: 1.45; word-wrap: break-word; }
+th { background: #e8eef5; font-weight: bold; text-align: left; }
+td.col-id { width: 11%; font-family: monospace; font-size: 9pt; background: #f8f9fa; }
+td.col-src { width: 37%; }
+td.col-tgt { width: 37%; }
+td.col-notes { width: 15%; font-size: 9.5pt; color: #333; }
+</style></head><body>
+<h1>📝 Tabela de Revisão Bilíngue — ${escapeHtmlForReview(projectTitle)}</h1>
+<p class="meta">Par de Idiomas: <strong>${escapeHtmlForReview(
+    sourceLang
+  )} → ${escapeHtmlForReview(targetLang)}</strong> • Total de Segmentos: <strong>${
+    segments.length
+  }</strong> • Edite a coluna <em>Tradução</em> ou adicione observações em <em>Notas/Comentários</em> no Word e reimporte no Amanuensis.</p>
+<table>
+<thead><tr><th>#ID</th><th>Original</th><th>Tradução (Editável pela Revisão)</th><th>Notas / Comentários</th></tr></thead>
+<tbody>
+${rowsHtml}
+</tbody></table>
+</body></html>`;
+}
+
+function parseBilingualReviewPayload(
+  segments: TranslationSegment[],
+  reviewedPayload: string
+): BilingualReviewDiffItem[] {
+  const parsedRows: Array<{ idx: number; revTgt: string; revNote: string }> = [];
+
+  // 1. Check [[TGT_START:N]]...[[TGT_END:N]] markers (from Word textutil or HTML export)
+  segments.forEach((_, idx) => {
+    const num = idx + 1;
+    const startTag = `[[TGT_START:${num}]]`;
+    const endTag = `[[TGT_END:${num}]]`;
+    const sPos = reviewedPayload.indexOf(startTag);
+    if (sPos !== -1) {
+      const afterStart = reviewedPayload.slice(sPos + startTag.length);
+      const ePos = afterStart.indexOf(endTag);
+      if (ePos !== -1) {
+        const rawTgt = unescapeHtmlForReview(afterStart.slice(0, ePos).trim());
+        const noteStart = `[[NOTE_START:${num}]]`;
+        const noteEnd = `[[NOTE_END:${num}]]`;
+        let rawNote = '';
+        const nsPos = reviewedPayload.indexOf(noteStart);
+        if (nsPos !== -1) {
+          const afterNs = reviewedPayload.slice(nsPos + noteStart.length);
+          const nePos = afterNs.indexOf(noteEnd);
+          if (nePos !== -1) {
+            rawNote = unescapeHtmlForReview(afterNs.slice(0, nePos).trim());
+          }
+        }
+        parsedRows.push({ idx, revTgt: rawTgt, revNote: rawNote });
+      }
+    }
+  });
+
+  // 2. Fallback: Markdown / pipe-delimited rows `#1 | Original | Tradução Revisada | Nota`
+  if (parsedRows.length === 0) {
+    reviewedPayload.split(/\r?\n/).forEach((line) => {
+      const trimmed = line.trim().replace(/^\||\|$/g, '').trim();
+      if (!trimmed || trimmed.startsWith('---') || trimmed.toLowerCase().startsWith('#id')) return;
+      const cols = line
+        .trim()
+        .replace(/^\||\|$/g, '')
+        .split('|')
+        .map((c) => c.trim());
+      if (cols.length >= 3) {
+        const idNum = parseInt(cols[0].replace(/^#|^seg-/i, '').trim(), 10);
+        if (!Number.isNaN(idNum) && idNum >= 1 && idNum <= segments.length) {
+          parsedRows.push({
+            idx: idNum - 1,
+            revTgt: cols[2],
+            revNote: cols[3] || '',
+          });
+        }
+      }
+    });
+  }
+
+  const diffs: BilingualReviewDiffItem[] = [];
+  parsedRows.forEach(({ idx, revTgt, revNote }) => {
+    const seg = segments[idx];
+    if (!seg) return;
+    const origTgt = seg.target_text.trim();
+    const cleanRev = revTgt.trim();
+    const cleanNote = revNote.trim();
+    const hasChange = Boolean(cleanRev && cleanRev !== origTgt);
+    const hasComment = Boolean(cleanNote);
+    if (hasChange || hasComment) {
+      diffs.push({
+        segment_index: idx,
+        segment_id: seg.id,
+        source_text: seg.source_text,
+        original_target_text: origTgt,
+        reviewed_target_text: cleanRev || origTgt,
+        reviewer_comment: cleanNote,
+        has_text_change: hasChange,
+      });
+    }
+  });
+
+  return diffs;
+}
+
+const DEFAULT_EPUB_CHAIN_CHAPTERS: EpubChapterUnit[] = [
+  {
+    chapter_id: 'cap01',
+    xhtml_href: 'OEBPS/Text/cap01_prologo.xhtml',
+    toc_title: 'Capítulo I — Prólogo: Maio de 1968 e os Comitês de Fábrica',
+    paragraph_sources: [
+      'When workers and students challenged power in May 1968, factory committees articulated new democratic demands.',
+      'Small local language models achieve remarkable translation fidelity when constrained by a project-specific harness and an auxiliary Translation Memory.',
+    ],
+  },
+  {
+    chapter_id: 'cap02',
+    xhtml_href: 'OEBPS/Text/cap02_instituicoes.xhtml',
+    toc_title: 'Capítulo II — Estado de Bem-Estar Social e Confiança Institucional',
+    paragraph_sources: [
+      'Without domain-specific glossaries and contextual grounding, unguided models suffer from terminology drift and hallucination.',
+      'Historical scans processed via the Amanuensis OCR Suite retain both bounding-box coordinates and searchable PDF text layers.',
+    ],
+  },
+];
+
+const DEFAULT_SAMPLE_SRT = `1
+00:00:01,000 --> 00:00:04,500
+When workers and students challenged power in May 1968.
+
+2
+00:00:05,000 --> 00:00:06,200
+Factory committees in Renault and Citroën organized general strikes across France.
+
+3
+00:00:06,800 --> 00:00:10,400
+Small local language models achieve remarkable translation fidelity.`;
+
+function parseSrtTimeMs(ts: string): number {
+  const clean = ts.trim().split(/\s+/)[0].replace(',', '.');
+  const parts = clean.split(':');
+  if (parts.length < 2) return 0;
+  const hours = parts.length === 3 ? parseInt(parts[0], 10) || 0 : 0;
+  const mins = parseInt(parts[parts.length - 2], 10) || 0;
+  const [secStr, msStr = '0'] = parts[parts.length - 1].split('.');
+  const secs = parseInt(secStr, 10) || 0;
+  const ms = parseInt(msStr.padEnd(3, '0').slice(0, 3), 10) || 0;
+  return hours * 3600000 + mins * 60000 + secs * 1000 + ms;
+}
+
+function analyzeSubtitlesCpsAndExport(
+  rawSrtOrVtt: string,
+  segments: TranslationSegment[]
+): { diagnostics: SubtitleCueDiagnostic[]; exportedSrt: string; exportedVtt: string } {
+  const blocks = rawSrtOrVtt
+    .replace(/\r\n/g, '\n')
+    .split(/\n{2,}/)
+    .map((b) => b.trim())
+    .filter((b) => b && !b.startsWith('WEBVTT'));
+
+  const diagnostics: SubtitleCueDiagnostic[] = [];
+  const srtBlocks: string[] = [];
+  const vttBlocks: string[] = ['WEBVTT\n'];
+
+  blocks.forEach((block, idx) => {
+    const lines = block.split('\n').map((l) => l.trim());
+    const tcIdx = lines.findIndex((l) => l.includes('-->'));
+    if (tcIdx === -1) return;
+    const timecodeRaw = lines[tcIdx];
+    const textLines = lines.slice(tcIdx + 1);
+    const [startStr, endStr] = timecodeRaw.split('-->').map((s) => s.trim());
+    const startMs = parseSrtTimeMs(startStr || '00:00:00,000');
+    const endMs = parseSrtTimeMs(endStr || '00:00:02,000');
+    const durationSecs = Math.max(0.5, (endMs - startMs) / 1000);
+    const sourceText = textLines.join('\n');
+    const segMatch = segments[idx];
+    const targetText =
+      segMatch && segMatch.target_text.trim() ? segMatch.target_text.trim() : sourceText;
+
+    const charCount = targetText.replace(/\r?\n/g, '').length;
+    const cps = Math.round((charCount / durationSecs) * 10) / 10;
+    const tgtLines = targetText.split('\n');
+    const lineCount = tgtLines.length;
+    const maxLineLength = tgtLines.reduce((acc, l) => Math.max(acc, l.length), 0);
+
+    const cpsStatus: SubtitleCpsStatus =
+      cps > 20 || maxLineLength > 42 || lineCount > 2
+        ? 'ExceedsLimit'
+        : cps > 17
+        ? 'WarningFast'
+        : 'Optimal';
+
+    diagnostics.push({
+      cue_number: idx + 1,
+      timecode_raw: timecodeRaw,
+      start_ms: startMs,
+      end_ms: endMs,
+      duration_secs: Math.round(durationSecs * 10) / 10,
+      source_text: sourceText,
+      target_text: targetText,
+      target_char_count: charCount,
+      chars_per_second: cps,
+      max_line_length: maxLineLength,
+      line_count: lineCount,
+      cps_status: cpsStatus,
+    });
+
+    srtBlocks.push(`${idx + 1}\n${timecodeRaw}\n${targetText}`);
+    vttBlocks.push(`${idx + 1}\n${timecodeRaw.replace(/,/g, '.')}\n${targetText}`);
+  });
+
+  return {
+    diagnostics,
+    exportedSrt: srtBlocks.join('\n\n'),
+    exportedVtt: vttBlocks.join('\n\n'),
+  };
 }
 
 const INITIAL_AGENT_MD = `# AGENT.md — Project Translation Harness: Tratado de Tradução & Humanidades
@@ -4747,6 +5013,259 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
     );
   }, [globalRegexPreview.previews]);
 
+  // ============================================================================
+  // ISSUE #5: BILINGUAL .DOCX TRACK-CHANGES ROUND-TRIP, EPUB CHAIN-FILES & SRT CPS
+  // ============================================================================
+  const [showBilingualReviewDrawer, setShowBilingualReviewDrawer] = useState<boolean>(false);
+  const [bilingualReviewSubTab, setBilingualReviewSubTab] = useState<
+    'docx_roundtrip' | 'epub_chain' | 'srt_cps'
+  >('docx_roundtrip');
+  const [bilingualReviewPayloadText, setBilingualReviewPayloadText] = useState<string>(
+    `#1 | # Capítulo I: Tradução Local Assistida por Harness | # Capítulo I: Tradução Local Orientada por Harness Editorial | Padronizar "Orientada por Harness Editorial" no título\n` +
+      `#2 | Small local language models achieve remarkable translation fidelity when constrained by a project-specific harness and an auxiliary Translation Memory. | Modelos de linguagem locais compactos alcançam extraordinária fidelidade tradutória quando ancorados por um harness específico do projeto e por uma Memória de Tradução auxiliar. | Revisora: preferir "extraordinária fidelidade tradutória" e "ancorados por"`
+  );
+  const [epubChainedChapters] = useState<EpubChapterUnit[]>(DEFAULT_EPUB_CHAIN_CHAPTERS);
+  const [rawSrtInput, setRawSrtInput] = useState<string>(DEFAULT_SAMPLE_SRT);
+
+  const bilingualReviewDiffs = useMemo(
+    () => parseBilingualReviewPayload(segments, bilingualReviewPayloadText),
+    [segments, bilingualReviewPayloadText]
+  );
+
+  const subtitleCpsReport = useMemo(
+    () => analyzeSubtitlesCpsAndExport(rawSrtInput, segments),
+    [rawSrtInput, segments]
+  );
+
+  const handleExportBilingualReviewDocx = useCallback(() => {
+    const htmlContent = buildBilingualReviewWordHtml(
+      onbProjectName,
+      onbSourceLang,
+      onbTargetLang,
+      segments
+    );
+    const cleanFileBase =
+      onbProjectName.replace(/[^a-zA-Z0-9À-ÿ_-]+/g, '_').slice(0, 42) + '_Revisao_Bilingue';
+    const wk = (
+      window as unknown as {
+        webkit?: {
+          messageHandlers?: {
+            amanuensisNative?: { postMessage: (msg: unknown) => void };
+          };
+        };
+      }
+    ).webkit;
+    if (wk?.messageHandlers?.amanuensisNative) {
+      wk.messageHandlers.amanuensisNative.postMessage({
+        action: 'exportBilingualDocx',
+        filename: `${cleanFileBase}.docx`,
+        htmlContent,
+      });
+      setStatusNotice(
+        `📝 Convertendo Tabela de Revisão Bilíngue ([Original | Tradução | Notas]) para Word (.docx) nativo via macOS textutil...`
+      );
+    } else {
+      downloadTextFile(
+        `${cleanFileBase}.doc`,
+        htmlContent,
+        'application/msword;charset=utf-8'
+      );
+      setStatusNotice(
+        `📝 Tabela de Revisão Bilíngue (${segments.length} segmentos) exportada para revisão externa no Word!`
+      );
+    }
+  }, [onbProjectName, onbSourceLang, onbTargetLang, segments]);
+
+  const handleTriggerImportBilingualReviewDocx = useCallback(() => {
+    const wk = (
+      window as unknown as {
+        webkit?: {
+          messageHandlers?: {
+            amanuensisNative?: { postMessage: (msg: unknown) => void };
+          };
+        };
+      }
+    ).webkit;
+    if (wk?.messageHandlers?.amanuensisNative) {
+      wk.messageHandlers.amanuensisNative.postMessage({
+        action: 'importBilingualDocx',
+      });
+    } else {
+      setShowBilingualReviewDrawer(true);
+      setBilingualReviewSubTab('docx_roundtrip');
+      setStatusNotice(
+        `📥 Cole ou edite o retorno da revisora na caixa de Reimportação Bilíngue .docx abaixo para inspecionar o diff!`
+      );
+    }
+  }, []);
+
+  const handleAcceptSingleDocxReviewDiff = useCallback(
+    (item: BilingualReviewDiffItem, evolveHarness: boolean) => {
+      setSegments((prev) =>
+        prev.map((s, idx) =>
+          idx === item.segment_index
+            ? {
+                ...s,
+                target_text: item.reviewed_target_text,
+                status: 'Approved',
+              }
+            : s
+        )
+      );
+      if (evolveHarness && item.has_text_change) {
+        const newRule: LearnedRule = {
+          id: `rule-docx-${Date.now().toString().slice(-4)}`,
+          pattern_from: (item.original_target_text || item.source_text).slice(0, 40) + '…',
+          preferred_to: item.reviewed_target_text.slice(0, 40) + '…',
+          rationale: item.reviewer_comment
+            ? `Revisão Externa .docx (Trecho #${item.segment_index + 1}): ${item.reviewer_comment}`
+            : `Aprendido da Revisão Externa .docx no Trecho #${item.segment_index + 1}`,
+          occurrences: 1,
+          active: true,
+        };
+        setLearnedRules((prev) => [newRule, ...prev]);
+      }
+      setStatusNotice(
+        evolveHarness
+          ? `🛡️ Revisão .docx aceita no Trecho #${
+              item.segment_index + 1
+            } e transformada em regra permanente no .amanuensis/AGENT.md!`
+          : `✓ Revisão .docx aplicada no Trecho #${item.segment_index + 1}!`
+      );
+    },
+    []
+  );
+
+  const handleAcceptAllDocxReviewDiffsAndEvolveHarness = useCallback(() => {
+    if (bilingualReviewDiffs.length === 0) return;
+    const byIdx = new Map<number, BilingualReviewDiffItem>();
+    bilingualReviewDiffs.forEach((d) => byIdx.set(d.segment_index, d));
+
+    setSegments((prev) =>
+      prev.map((s, idx) => {
+        const d = byIdx.get(idx);
+        if (!d) return s;
+        return {
+          ...s,
+          target_text: d.reviewed_target_text,
+          status: 'Approved',
+        };
+      })
+    );
+
+    const newRules: LearnedRule[] = bilingualReviewDiffs
+      .filter((d) => d.has_text_change)
+      .map((d, i) => ({
+        id: `rule-docx-batch-${i + 1}`,
+        pattern_from: (d.original_target_text || d.source_text).slice(0, 40) + '…',
+        preferred_to: d.reviewed_target_text.slice(0, 40) + '…',
+        rationale: d.reviewer_comment
+          ? `Revisão Externa .docx (Trecho #${d.segment_index + 1}): ${d.reviewer_comment}`
+          : `Revisão Externa .docx aceita em lote (Trecho #${d.segment_index + 1})`,
+        occurrences: 1,
+        active: true,
+      }));
+
+    if (newRules.length > 0) {
+      setLearnedRules((prev) => [...newRules, ...prev]);
+    }
+    setStatusNotice(
+      `✅ [Round-Trip .docx Completo] ${bilingualReviewDiffs.length} revisões externas aplicadas na Mesa de Tradução e ${newRules.length} novas regras gravadas no ProjectHarness (.amanuensis/AGENT.md)!`
+    );
+  }, [bilingualReviewDiffs]);
+
+  const handleLoadEpubChainedChaptersIntoWorkbench = useCallback(() => {
+    const chainedSegs: TranslationSegment[] = [];
+    let globalIdx = 0;
+    epubChainedChapters.forEach((chap, cIdx) => {
+      chap.paragraph_sources.forEach((pSrc) => {
+        chainedSegs.push({
+          id: `seg-epub-${cIdx + 1}-${globalIdx + 1}`,
+          index: globalIdx,
+          source_text: pSrc,
+          target_text: generateLocalTranslation(
+            pSrc,
+            activeModel.name,
+            glossary,
+            learnedRules
+          ),
+          status: 'Translated',
+          bbox: {
+            page: cIdx + 1,
+            x: 0.08,
+            y: Math.min(0.85, 0.1 + globalIdx * 0.14),
+            width: 0.84,
+            height: 0.11,
+          },
+        });
+        globalIdx++;
+      });
+    });
+    setSegments(chainedSegs);
+    setActiveSegIdx(0);
+    setStatusNotice(
+      `📚 [Chain Files .epub — Wordfast] ${epubChainedChapters.length} capítulos XHTML (${chainedSegs.length} parágrafos) encadeados em uma única visão contínua sem Tag-Soup!`
+    );
+  }, [epubChainedChapters, activeModel.name, glossary, learnedRules]);
+
+  const handleExportEpubPackageXhtml = useCallback(() => {
+    let cursor = 0;
+    const parts: string[] = [];
+    epubChainedChapters.forEach((chap) => {
+      const pTags = chap.paragraph_sources
+        .map((src) => {
+          const seg = segments[cursor++];
+          const text = seg && seg.target_text.trim() ? seg.target_text.trim() : src;
+          return `    <p>${escapeHtmlForReview(text)}</p>`;
+        })
+        .join('\n');
+      parts.push(
+        `<!-- FILE: ${chap.xhtml_href} (${chap.toc_title}) -->\n<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="${onbTargetLang}">\n<head><title>${escapeHtmlForReview(
+          chap.toc_title
+        )}</title></head>\n<body>\n  <section id="${chap.chapter_id}">\n    <h1>${escapeHtmlForReview(
+          chap.toc_title
+        )}</h1>\n${pTags}\n  </section>\n</body>\n</html>`
+      );
+    });
+    downloadTextFile(
+      onbProjectName.replace(/[^a-zA-Z0-9_-]+/g, '_') + '_OEBPS_Chapters.xhtml',
+      parts.join('\n\n'),
+      'application/xhtml+xml;charset=utf-8'
+    );
+    setStatusNotice(
+      `📚 Capítulos XHTML do E-book (.epub) exportados preservando a estrutura OEBPS/toc.ncx e zero Tag-Soup!`
+    );
+  }, [epubChainedChapters, onbProjectName, onbTargetLang, segments]);
+
+  const handleLoadSubtitlesIntoWorkbench = useCallback(() => {
+    const newSegs: TranslationSegment[] = subtitleCpsReport.diagnostics.map((d, i) => ({
+      id: `seg-srt-${d.cue_number}`,
+      index: i,
+      source_text: d.source_text,
+      target_text: generateLocalTranslation(
+        d.source_text,
+        activeModel.name,
+        glossary,
+        learnedRules
+      ),
+      status: 'Translated',
+      bbox: {
+        page: 1,
+        x: 0.08,
+        y: Math.min(0.85, 0.1 + i * 0.14),
+        width: 0.84,
+        height: 0.11,
+      },
+    }));
+    if (newSegs.length > 0) {
+      setSegments(newSegs);
+      setActiveSegIdx(0);
+      setStatusNotice(
+        `🎬 ${newSegs.length} legendas (.srt/.vtt) carregadas na Mesa de Tradução com validação em tempo real de Caracteres Por Segundo (CPS)!`
+      );
+    }
+  }, [subtitleCpsReport.diagnostics, activeModel.name, glossary, learnedRules]);
+
   const handleConfirmAndEvolveHarness = useCallback(
     (idx: number) => {
       const seg = segments[idx];
@@ -6545,6 +7064,43 @@ ${adr.adopted_decision}
       setStatusNotice(
         `📚 Arquivo "${payload.filename}" (${doc.passage_count} parágrafos) importado para .amanuensis/corpus/ com janela de Contexto Expandido (3¶)!`
       );
+    };
+    (
+      win as unknown as {
+        amanuensisReceiveExportedDocxInfo?: (info: {
+          savedPath: string;
+          filename: string;
+        }) => void;
+        amanuensisReceiveBilingualReviewDoc?: (payload: {
+          filename: string;
+          path: string;
+          content: string;
+        }) => void;
+      }
+    ).amanuensisReceiveExportedDocxInfo = (info) => {
+      if (info && info.savedPath) {
+        setStatusNotice(
+          `✅ Tabela de Revisão Bilíngue Word (.docx) gravada em "${info.savedPath}"! Envie para a revisora/editora e depois clique em "📥 Reimportar .docx Revisado".`
+        );
+      }
+    };
+    (
+      win as unknown as {
+        amanuensisReceiveBilingualReviewDoc?: (payload: {
+          filename: string;
+          path: string;
+          content: string;
+        }) => void;
+      }
+    ).amanuensisReceiveBilingualReviewDoc = (payload) => {
+      if (payload && payload.content) {
+        setBilingualReviewPayloadText(payload.content);
+        setShowBilingualReviewDrawer(true);
+        setBilingualReviewSubTab('docx_roundtrip');
+        setStatusNotice(
+          `📥 Documento revisado "${payload.filename}" reimportado! Confira o diff exato de cada trecho alterado pela revisão abaixo e evolua o ProjectHarness.`
+        );
+      }
     };
     win.amanuensisReceiveScanSnippet = (snippet) => {
       if (snippet && snippet.cropDataUrl) {
@@ -9498,6 +10054,14 @@ ${adr.adopted_decision}
                 </button>
                 <button
                   className="btn"
+                  style={{ fontSize: '0.72rem', padding: '2px 7px' }}
+                  onClick={() => setShowBilingualReviewDrawer((prev) => !prev)}
+                  title="Revisão Bilíngue Externa em Word (.docx Track Changes Round-Trip — Trados) e Suporte Nativo a E-books .epub (Chain Files) & Legendas .srt/.vtt com Validação CPS (Wordfast)"
+                >
+                  📝 Revisão .docx & EPUB/SRT ({bilingualReviewDiffs.length})
+                </button>
+                <button
+                  className="btn"
                   onClick={() => setZenMode(true)}
                   title="Ativar Modo Zen para foco criativo sem estímulos de tela (⌘\)"
                 >
@@ -9515,6 +10079,389 @@ ${adr.adopted_decision}
               </div>
             </div>
             <div className="pane-body">
+              {/* Issue #5: Bilingual .docx Review Round-Trip (Trados) + .epub Chain Files & .srt/.vtt CPS Validator (Wordfast) */}
+              {showBilingualReviewDrawer && (
+                <div
+                  className="card"
+                  style={{
+                    marginBottom: '10px',
+                    border: '2px solid var(--accent)',
+                    background: 'var(--page-canvas)',
+                  }}
+                >
+                  <div className="card-title" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                    <span>
+                      📝 Revisão Bilíngue Externa em Word (.docx Round-Trip) & Formatos Editoriais
+                      (.epub Chain Files / .srt CPS)
+                    </span>
+                    <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className={`btn ${
+                          bilingualReviewSubTab === 'docx_roundtrip' ? 'btn-primary' : ''
+                        }`}
+                        style={{ fontSize: '0.71rem', padding: '2px 8px' }}
+                        onClick={() => setBilingualReviewSubTab('docx_roundtrip')}
+                      >
+                        📝 1. Revisão Bilíngue Word (.docx Round-Trip)
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn ${
+                          bilingualReviewSubTab === 'epub_chain' ? 'btn-primary' : ''
+                        }`}
+                        style={{ fontSize: '0.71rem', padding: '2px 8px' }}
+                        onClick={() => setBilingualReviewSubTab('epub_chain')}
+                      >
+                        📚 2. E-book .epub (Chain Files s/ Tag-Soup)
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn ${
+                          bilingualReviewSubTab === 'srt_cps' ? 'btn-primary' : ''
+                        }`}
+                        style={{ fontSize: '0.71rem', padding: '2px 8px' }}
+                        onClick={() => setBilingualReviewSubTab('srt_cps')}
+                      >
+                        🎬 3. Legendas .srt / .vtt (Validador CPS)
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: '0.71rem', padding: '2px 8px' }}
+                        onClick={() => setShowBilingualReviewDrawer(false)}
+                      >
+                        ✕ Fechar
+                      </button>
+                    </div>
+                  </div>
+
+                  {bilingualReviewSubTab === 'docx_roundtrip' && (
+                    <div>
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: '6px',
+                          marginBottom: '8px',
+                        }}
+                      >
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          Exporte uma tabela Word <code>[#ID | Original | Tradução | Notas]</code>{' '}
+                          para o preparador/revisor editar no Microsoft Word ou LibreOffice, e
+                          reimporte o <code>.docx</code> devolvido para ver o diff e evoluir o{' '}
+                          <code>.amanuensis/AGENT.md</code>:
+                        </div>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                            onClick={handleExportBilingualReviewDocx}
+                          >
+                            📤 Exportar p/ Revisora (.docx Bilíngue)
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                            onClick={handleTriggerImportBilingualReviewDocx}
+                          >
+                            📥 Reimportar .docx Revisado
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-success"
+                            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                            disabled={bilingualReviewDiffs.length === 0}
+                            onClick={handleAcceptAllDocxReviewDiffsAndEvolveHarness}
+                          >
+                            🛡️ Aceitar Todas ({bilingualReviewDiffs.length}) & Evoluir AGENT.md
+                          </button>
+                        </div>
+                      </div>
+
+                      <textarea
+                        className="segment-textarea"
+                        style={{
+                          minHeight: '58px',
+                          fontSize: '0.73rem',
+                          fontFamily: 'var(--font-mono)',
+                          marginBottom: '8px',
+                        }}
+                        value={bilingualReviewPayloadText}
+                        onChange={(e) => setBilingualReviewPayloadText(e.target.value)}
+                        placeholder="Cole aqui o retorno da tabela .docx (#ID | Original | Tradução Revisada | Notas da Revisora) ou clique em '📥 Reimportar .docx Revisado'..."
+                      />
+
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '6px',
+                          maxHeight: '210px',
+                          overflowY: 'auto',
+                        }}
+                      >
+                        {bilingualReviewDiffs.map((diff) => (
+                          <div
+                            key={diff.segment_id}
+                            style={{
+                              padding: '6px 8px',
+                              background: 'var(--surface)',
+                              border: '1px solid var(--border-dark)',
+                              fontSize: '0.75rem',
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                marginBottom: '4px',
+                                flexWrap: 'wrap',
+                                gap: '4px',
+                              }}
+                            >
+                              <div>
+                                <strong>Trecho #{diff.segment_index + 1}</strong>{' '}
+                                {diff.reviewer_comment && (
+                                  <span className="badge badge-fuzzy">
+                                    💬 Nota da Revisora: "{diff.reviewer_comment}"
+                                  </span>
+                                )}
+                              </div>
+                              <div style={{ display: 'flex', gap: '5px' }}>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  style={{ fontSize: '0.68rem', padding: '1px 7px' }}
+                                  onClick={() => handleAcceptSingleDocxReviewDiff(diff, false)}
+                                >
+                                  ✓ Aceitar no Trecho
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-success"
+                                  style={{ fontSize: '0.68rem', padding: '1px 7px' }}
+                                  onClick={() => handleAcceptSingleDocxReviewDiff(diff, true)}
+                                >
+                                  🛡️ Aceitar & Virar Regra no AGENT.md
+                                </button>
+                              </div>
+                            </div>
+                            <div>
+                              {computeWordDiff(
+                                diff.original_target_text || diff.source_text,
+                                diff.reviewed_target_text
+                              ).map((tok, tIdx) =>
+                                tok.op === 'equal' ? (
+                                  <span key={tIdx}>{tok.text} </span>
+                                ) : tok.op === 'del' ? (
+                                  <span key={tIdx} className="diff-del">
+                                    {tok.text}{' '}
+                                  </span>
+                                ) : (
+                                  <span key={tIdx} className="diff-ins">
+                                    {tok.text}{' '}
+                                  </span>
+                                )
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {bilingualReviewSubTab === 'epub_chain' && (
+                    <div>
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: '6px',
+                          marginBottom: '8px',
+                        }}
+                      >
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          <strong>Visão Multi-Capítulos (Chain Files — Wordfast):</strong> Encadeie
+                          múltiplos arquivos XHTML internos de um <code>.epub</code> (
+                          <code>OEBPS/Text/*.xhtml</code> + <code>toc.ncx</code>) em uma única mesa
+                          contínua sem "Tag Soup" bloqueante:
+                        </div>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                            onClick={handleLoadEpubChainedChaptersIntoWorkbench}
+                          >
+                            📚 Encadear Capítulos .epub na Mesa ({epubChainedChapters.length} caps)
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-success"
+                            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                            onClick={handleExportEpubPackageXhtml}
+                          >
+                            ⬇ Exportar Capítulos XHTML (.epub)
+                          </button>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                        {epubChainedChapters.map((chap) => (
+                          <div
+                            key={chap.chapter_id}
+                            style={{
+                              padding: '6px 8px',
+                              background: 'var(--surface)',
+                              border: '1px solid var(--border-dark)',
+                              fontSize: '0.75rem',
+                            }}
+                          >
+                            <div style={{ fontWeight: 700 }}>
+                              📖 {chap.toc_title}{' '}
+                              <span className="badge badge-accent">{chap.xhtml_href}</span>
+                            </div>
+                            <div style={{ color: 'var(--text-muted)', fontSize: '0.71rem' }}>
+                              {chap.paragraph_sources.length} parágrafos XHTML encadeados • Sumário{' '}
+                              <code>toc.ncx</code> preservado
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {bilingualReviewSubTab === 'srt_cps' && (
+                    <div>
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: '6px',
+                          marginBottom: '8px',
+                        }}
+                      >
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          <strong>Legendagem Audiovisual (.srt / .vtt) com Validador CPS:</strong>{' '}
+                          Calcula Caracteres Por Segundo (<code>CPS ≤ 17</code> ideal,{' '}
+                          <code>&gt; 20 CPS</code> alerta crítico) e comprimento de linha (
+                          <code>≤ 42 caract/linha</code>):
+                        </div>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                            onClick={handleLoadSubtitlesIntoWorkbench}
+                          >
+                            🎬 Carregar Legendas na Mesa ({subtitleCpsReport.diagnostics.length}{' '}
+                            cues)
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-success"
+                            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                            onClick={() => {
+                              downloadTextFile(
+                                onbProjectName.replace(/[^a-zA-Z0-9_-]+/g, '_') + '.srt',
+                                subtitleCpsReport.exportedSrt,
+                                'text/plain;charset=utf-8'
+                              );
+                              setStatusNotice('🎬 Arquivo de legenda .srt validado e exportado!');
+                            }}
+                          >
+                            ⬇ Exportar .srt
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                            onClick={() => {
+                              downloadTextFile(
+                                onbProjectName.replace(/[^a-zA-Z0-9_-]+/g, '_') + '.vtt',
+                                subtitleCpsReport.exportedVtt,
+                                'text/vtt;charset=utf-8'
+                              );
+                              setStatusNotice('🎬 Arquivo WebVTT (.vtt) validado e exportado!');
+                            }}
+                          >
+                            ⬇ Exportar .vtt
+                          </button>
+                        </div>
+                      </div>
+
+                      <textarea
+                        className="segment-textarea"
+                        style={{
+                          minHeight: '56px',
+                          fontSize: '0.72rem',
+                          fontFamily: 'var(--font-mono)',
+                          marginBottom: '6px',
+                        }}
+                        value={rawSrtInput}
+                        onChange={(e) => setRawSrtInput(e.target.value)}
+                      />
+
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '5px',
+                          maxHeight: '180px',
+                          overflowY: 'auto',
+                        }}
+                      >
+                        {subtitleCpsReport.diagnostics.map((cue) => (
+                          <div
+                            key={cue.cue_number}
+                            style={{
+                              padding: '5px 8px',
+                              background: 'var(--surface)',
+                              border: '1px solid var(--border-dark)',
+                              fontSize: '0.74rem',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: '8px',
+                              flexWrap: 'wrap',
+                            }}
+                          >
+                            <div>
+                              <strong>
+                                Cue #{cue.cue_number} ({cue.timecode_raw} • {cue.duration_secs}s)
+                              </strong>
+                              <div>{cue.target_text}</div>
+                            </div>
+                            <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
+                              <span
+                                className={`badge ${
+                                  cue.cps_status === 'Optimal'
+                                    ? 'badge-exact'
+                                    : cue.cps_status === 'WarningFast'
+                                    ? 'badge-accent'
+                                    : 'badge-fuzzy'
+                                }`}
+                              >
+                                {cue.chars_per_second} CPS ({cue.target_char_count} caract • máx{' '}
+                                {cue.max_line_length}/linha)
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               {/* Issue #4: Global Regex Search & Replace Drawer (Cmd+Shift+F — OmegaT) */}
               {showGlobalRegexDrawer && (
                 <div

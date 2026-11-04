@@ -357,6 +357,44 @@ export interface GlobalRegexPreviewItem {
   is_contextual_exception: boolean;
 }
 
+// Issue #5: Trados & Wordfast Bilingual .docx Review Round-Trip, Multi-Chapter .epub Chain Files & .srt/.vtt CPS Validator
+export interface BilingualReviewDiffItem {
+  segment_index: number;
+  segment_id: string;
+  source_text: string;
+  original_target_text: string;
+  reviewed_target_text: string;
+  reviewer_comment: string;
+  has_text_change: boolean;
+  accepted?: boolean;
+  evolved_into_harness?: boolean;
+}
+
+export interface EpubChapterUnit {
+  chapter_id: string;
+  xhtml_href: string;
+  toc_title: string;
+  paragraph_sources: string[];
+}
+
+export type SubtitleCpsStatus = 'Optimal' | 'WarningFast' | 'ExceedsLimit';
+
+export interface SubtitleCueDiagnostic {
+  cue_number: number;
+  timecode_raw: string;
+  start_ms: number;
+  end_ms: number;
+  duration_secs: number;
+  source_text: string;
+  target_text: string;
+  target_char_count: number;
+  chars_per_second: number;
+  max_line_length: number;
+  line_count: number;
+  cps_status: SubtitleCpsStatus;
+}
+
+
 
 
 

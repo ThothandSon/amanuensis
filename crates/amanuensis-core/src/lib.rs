@@ -1,3 +1,4 @@
+pub mod bilingual_review_epub_srt;
 pub mod dejavu_assemble;
 pub mod git_story;
 pub mod harness;
@@ -1140,5 +1141,199 @@ Maio francês: quando os operários e estudantes desafiaram o poder em 1968 (Rev
         assert_eq!(applied.affected_segments_count, 2);
         assert!(segments[0].target_text.contains("operários e estudantes"));
         assert!(segments[1].target_text.contains("uniram operários na Renault"));
+    }
+
+    #[test]
+    fn test_bilingual_docx_review_table_export_and_reimport_roundtrip_with_harness_evolution() {
+        use crate::bilingual_review_epub_srt::BilingualReviewAndMediaEngine;
+        use crate::ocr::BoundingBox;
+        use crate::project::{SegmentStatus, TranslationSegment};
+
+        let mut segments = vec![
+            TranslationSegment {
+                id: "seg-1".to_string(),
+                index: 0,
+                source_text: "Modern welfare states depend on institutional trust.".to_string(),
+                target_text: "Estados de bem-estar modernos dependem de confiança institucional.".to_string(),
+                ai_draft_snapshot: None,
+                status: SegmentStatus::Translated,
+                bbox: BoundingBox {
+                    page: 1,
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.8,
+                    height: 0.1,
+                },
+            },
+            TranslationSegment {
+                id: "seg-2".to_string(),
+                index: 1,
+                source_text: "Representative mechanisms require deliberative renewal.".to_string(),
+                target_text: "Mecanismos representativos exigem renovação deliberativa.".to_string(),
+                ai_draft_snapshot: None,
+                status: SegmentStatus::Translated,
+                bbox: BoundingBox {
+                    page: 1,
+                    x: 0.1,
+                    y: 0.25,
+                    width: 0.8,
+                    height: 0.1,
+                },
+            },
+        ];
+
+        // 1. Export Word-compatible bilingual review table
+        let exported_html = BilingualReviewAndMediaEngine::export_bilingual_review_document(
+            "Ensaios de Ciência Política",
+            "en-US",
+            "pt-BR",
+            &segments,
+        );
+        assert!(exported_html.contains("[[TGT_START:1]]"));
+        assert!(exported_html.contains("[[TGT_START:2]]"));
+
+        // 2. Simulate external proofreader editing segment #1 and leaving a comment in Word
+        let reviewed_doc = exported_html
+            .replace(
+                "[[TGT_START:1]]Estados de bem-estar modernos dependem de confiança institucional.[[TGT_END:1]]",
+                "[[TGT_START:1]]Os Estados de Bem-Estar Social contemporâneos alicerçam-se na confiança institucional.[[TGT_END:1]]",
+            )
+            .replace(
+                "[[NOTE_START:1]][[NOTE_END:1]]",
+                "[[NOTE_START:1]]Preferir 'Estados de Bem-Estar Social contemporâneos' conforme manual da editora.[[NOTE_END:1]]",
+            );
+
+        let report =
+            BilingualReviewAndMediaEngine::reimport_bilingual_review_document(&segments, &reviewed_doc);
+        assert_eq!(report.total_rows_parsed, 2);
+        assert_eq!(report.modified_segments_count, 1);
+        assert_eq!(report.commented_segments_count, 1);
+        assert_eq!(report.diffs.len(), 1);
+        assert!(report.diffs[0]
+            .reviewed_target_text
+            .contains("Estados de Bem-Estar Social contemporâneos"));
+
+        // 3. Apply accepted diffs and verify LearnedRule generation for ProjectHarness
+        let new_rules =
+            BilingualReviewAndMediaEngine::apply_accepted_review_diffs(&mut segments, &report.diffs);
+        assert_eq!(new_rules.len(), 1);
+        assert_eq!(segments[0].status, SegmentStatus::Approved);
+        assert!(segments[0]
+            .target_text
+            .contains("Estados de Bem-Estar Social contemporâneos"));
+    }
+
+    #[test]
+    fn test_epub_multi_chapter_chain_files_export_preserves_xhtml_structure_without_tag_soup() {
+        use crate::bilingual_review_epub_srt::{BilingualReviewAndMediaEngine, EpubChapterUnit};
+        use crate::ocr::BoundingBox;
+        use crate::project::{SegmentStatus, TranslationSegment};
+
+        let chapters = vec![
+            EpubChapterUnit {
+                chapter_id: "cap01".to_string(),
+                xhtml_href: "OEBPS/Text/cap01.xhtml".to_string(),
+                toc_title: "Capítulo I — Maio de 1968".to_string(),
+                paragraph_sources: vec![
+                    "Workers occupied the factories.".to_string(),
+                    "Students convened in the Sorbonne.".to_string(),
+                ],
+            },
+            EpubChapterUnit {
+                chapter_id: "cap02".to_string(),
+                xhtml_href: "OEBPS/Text/cap02.xhtml".to_string(),
+                toc_title: "Capítulo II — Os Comitês de Ação".to_string(),
+                paragraph_sources: vec!["Neighborhood committees printed posters.".to_string()],
+            },
+        ];
+
+        let translated_segments = vec![
+            TranslationSegment {
+                id: "seg-1".to_string(),
+                index: 0,
+                source_text: "Workers occupied the factories.".to_string(),
+                target_text: "Os operários ocuparam as fábricas.".to_string(),
+                ai_draft_snapshot: None,
+                status: SegmentStatus::Approved,
+                bbox: BoundingBox {
+                    page: 1,
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.8,
+                    height: 0.1,
+                },
+            },
+            TranslationSegment {
+                id: "seg-2".to_string(),
+                index: 1,
+                source_text: "Students convened in the Sorbonne.".to_string(),
+                target_text: "Os estudantes reuniram-se na Sorbonne.".to_string(),
+                ai_draft_snapshot: None,
+                status: SegmentStatus::Approved,
+                bbox: BoundingBox {
+                    page: 1,
+                    x: 0.1,
+                    y: 0.2,
+                    width: 0.8,
+                    height: 0.1,
+                },
+            },
+            TranslationSegment {
+                id: "seg-3".to_string(),
+                index: 2,
+                source_text: "Neighborhood committees printed posters.".to_string(),
+                target_text: "Os comitês de bairro imprimiram cartazes.".to_string(),
+                ai_draft_snapshot: None,
+                status: SegmentStatus::Approved,
+                bbox: BoundingBox {
+                    page: 2,
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.8,
+                    height: 0.1,
+                },
+            },
+        ];
+
+        let xhtml_files = BilingualReviewAndMediaEngine::chain_epub_chapters_and_export_xhtml(
+            &chapters,
+            &translated_segments,
+        );
+        assert_eq!(xhtml_files.len(), 2);
+        assert_eq!(xhtml_files[0].0, "OEBPS/Text/cap01.xhtml");
+        assert!(xhtml_files[0]
+            .1
+            .contains("<p>Os operários ocuparam as fábricas.</p>"));
+        assert!(xhtml_files[1]
+            .1
+            .contains("<p>Os comitês de bairro imprimiram cartazes.</p>"));
+    }
+
+    #[test]
+    fn test_srt_and_vtt_subtitle_cps_validator_flags_fast_cues_and_exports_clean_srt() {
+        use crate::bilingual_review_epub_srt::{BilingualReviewAndMediaEngine, SubtitleCpsStatus};
+
+        let raw_srt = "\
+1
+00:00:01,000 --> 00:00:04,000
+When workers and students challenged power in May 1968.
+
+2
+00:00:04,500 --> 00:00:05,500
+Short time window with an excessively long translation that exceeds twenty characters per second.";
+
+        let overrides = vec![
+            "Quando operários e estudantes desafiaram\no poder em maio de 1968.".to_string(),
+            "Esta legenda tem caracteres demais para apenas um segundo de duração na tela!".to_string(),
+        ];
+
+        let (diags, exported) =
+            BilingualReviewAndMediaEngine::analyze_and_export_subtitles_cps(raw_srt, &overrides);
+        assert_eq!(diags.len(), 2);
+        // Cue 2 is ~77 chars in 1.0s -> 77 CPS -> ExceedsLimit
+        assert_eq!(diags[1].cps_status, SubtitleCpsStatus::ExceedsLimit);
+        assert!(diags[1].chars_per_second > 20.0);
+        assert!(exported.contains("00:00:01,000 --> 00:00:04,000"));
+        assert!(exported.contains("Quando operários e estudantes desafiaram"));
     }
 }
