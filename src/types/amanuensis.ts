@@ -394,6 +394,49 @@ export interface SubtitleCueDiagnostic {
   cps_status: SubtitleCpsStatus;
 }
 
+// Issue #6: Across-inspired Cross-Chapter Consistency Matrix, Translator's Notes [N.T.] & Editorial Workflow Stages
+export type EditorialWorkflowStage =
+  | 'DraftTranslation'
+  | 'CopyeditingPreparation'
+  | 'FinalCollationApproved';
+
+export interface SegmentTranslatorAnnotation {
+  segment_index: number;
+  segment_id: string;
+  editorial_stage: EditorialWorkflowStage;
+  internal_working_note: string;
+  publishable_translator_footnote: string;
+  updated_at?: string;
+}
+
+export type ConsistencyIssueKind =
+  | 'TargetInconsistency'
+  | 'InverseCollision'
+  | 'GlossaryDrift'
+  | 'DialoguePunctuationDrift';
+
+export interface ConsistencyMatrixFinding {
+  id: string;
+  kind: ConsistencyIssueKind;
+  severity_label: string;
+  affected_segment_indices: number[];
+  summary: string;
+  details: string;
+  suggested_fix: string;
+}
+
+export interface ConsistencyMatrixReport {
+  total_segments_checked: number;
+  consistency_score_pct: number;
+  target_inconsistencies_count: number;
+  inverse_collisions_count: number;
+  glossary_drifts_count: number;
+  dialogue_punctuation_drifts_count: number;
+  dominant_dialogue_style: string;
+  findings: ConsistencyMatrixFinding[];
+}
+
+
 
 
 

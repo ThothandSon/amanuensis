@@ -1,3 +1,4 @@
+pub mod across_consistency_qa;
 pub mod bilingual_review_epub_srt;
 pub mod dejavu_assemble;
 pub mod git_story;
@@ -1335,5 +1336,187 @@ Short time window with an excessively long translation that exceeds twenty chara
         assert!(diags[1].chars_per_second > 20.0);
         assert!(exported.contains("00:00:01,000 --> 00:00:04,000"));
         assert!(exported.contains("Quando operários e estudantes desafiaram"));
+    }
+
+    #[test]
+    fn test_cross_chapter_consistency_matrix_detects_inconsistency_collision_glossary_and_dialogue_drift() {
+        use crate::across_consistency_qa::{AcrossConsistencyAndNotesEngine, ConsistencyIssueKind};
+        use crate::harness::GlossaryTerm;
+        use crate::ocr::BoundingBox;
+        use crate::project::{SegmentStatus, TranslationSegment};
+
+        let make_seg = |idx: usize, src: &str, tgt: &str| TranslationSegment {
+            id: format!("seg-{}", idx + 1),
+            index: idx,
+            source_text: src.to_string(),
+            target_text: tgt.to_string(),
+            ai_draft_snapshot: None,
+            status: SegmentStatus::Translated,
+            bbox: BoundingBox {
+                page: 1,
+                x: 0.1,
+                y: 0.1,
+                width: 0.8,
+                height: 0.1,
+            },
+        };
+
+        let segments = vec![
+            // 1 & 2: TargetInconsistency (same source, two different translations without exception)
+            make_seg(0, "The General Assembly convened at dawn.", "A Assembleia Geral reuniu-se ao amanhecer."),
+            make_seg(1, "The General Assembly convened at dawn.", "O Plenário Geral juntou-se na alvorada."),
+            // 3 & 4: InverseCollision (different sources, identical translation)
+            make_seg(2, "The strike committee issued a manifesto.", "O comitê publicou a nota."),
+            make_seg(3, "The factory council released the bulletin.", "O comitê publicou a nota."),
+            // 5: GlossaryDrift ("welfare state" must be "Estado de Bem-Estar Social")
+            make_seg(4, "The modern welfare state expanded.", "O Estado assistencial moderno expandiu-se."),
+            // 6 & 7: DialoguePunctuationDrift (mixing `—` and `"`)
+            make_seg(5, "— We will not retreat, said the delegate.", "— Não recuaremos, disse o delegado."),
+            make_seg(6, "\"The factory belongs to the workers,\" she replied.", "\"A fábrica pertence aos operários\", respondeu ela."),
+        ];
+
+        let glossary = vec![GlossaryTerm {
+            source_term: "welfare state".to_string(),
+            target_term: "Estado de Bem-Estar Social".to_string(),
+            notes: None,
+            do_not_translate: false,
+            case_sensitive: false,
+        }];
+
+        let report = AcrossConsistencyAndNotesEngine::run_cross_chapter_consistency_matrix(
+            &segments,
+            &glossary,
+            &[],
+        );
+
+        assert_eq!(report.target_inconsistencies_count, 1);
+        assert_eq!(report.inverse_collisions_count, 1);
+        assert_eq!(report.glossary_drifts_count, 1);
+        assert_eq!(report.dialogue_punctuation_drifts_count, 1);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.kind == ConsistencyIssueKind::TargetInconsistency));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.kind == ConsistencyIssueKind::InverseCollision));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.kind == ConsistencyIssueKind::GlossaryDrift));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.kind == ConsistencyIssueKind::DialoguePunctuationDrift));
+    }
+
+    #[test]
+    fn test_consistency_matrix_respects_contextual_exceptions_when_auditing_identical_sources() {
+        use crate::across_consistency_qa::AcrossConsistencyAndNotesEngine;
+        use crate::ocr::BoundingBox;
+        use crate::omegat_propagation::ContextualExceptionRecord;
+        use crate::project::{SegmentStatus, TranslationSegment};
+
+        let segments = vec![
+            TranslationSegment {
+                id: "seg-1".to_string(),
+                index: 0,
+                source_text: "Liberty requires accountability.".to_string(),
+                target_text: "A liberdade exige responsabilização.".to_string(),
+                ai_draft_snapshot: None,
+                status: SegmentStatus::Approved,
+                bbox: BoundingBox {
+                    page: 1,
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.8,
+                    height: 0.1,
+                },
+            },
+            TranslationSegment {
+                id: "seg-2".to_string(),
+                index: 1,
+                source_text: "Liberty requires accountability.".to_string(),
+                target_text: "A liberdade reclama prestação de contas (Exceção Poética).".to_string(),
+                ai_draft_snapshot: None,
+                status: SegmentStatus::Approved,
+                bbox: BoundingBox {
+                    page: 2,
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.8,
+                    height: 0.1,
+                },
+            },
+        ];
+
+        let exceptions = vec![ContextualExceptionRecord {
+            segment_id: "seg-2".to_string(),
+            segment_index: 1,
+            source_text: "Liberty requires accountability.".to_string(),
+            alternative_target_text: "A liberdade reclama prestação de contas (Exceção Poética).".to_string(),
+            context_hash: "ctx-poetic0001".to_string(),
+            prev_snippet: "Poetic chapter".to_string(),
+            next_snippet: "End".to_string(),
+            rationale_note: "Intentional alternative translation".to_string(),
+        }];
+
+        let report = AcrossConsistencyAndNotesEngine::run_cross_chapter_consistency_matrix(
+            &segments,
+            &[],
+            &exceptions,
+        );
+        assert_eq!(
+            report.target_inconsistencies_count, 0,
+            "Segment marked as Contextual Exception must not trigger a false TargetInconsistency warning"
+        );
+    }
+
+    #[test]
+    fn test_translator_footnotes_nt_compile_into_markdown_while_keeping_internal_working_notes_private() {
+        use crate::across_consistency_qa::{
+            AcrossConsistencyAndNotesEngine, EditorialWorkflowStage, SegmentTranslatorAnnotation,
+        };
+        use crate::ocr::BoundingBox;
+        use crate::project::{SegmentStatus, TranslationSegment};
+
+        let segments = vec![TranslationSegment {
+            id: "seg-1".to_string(),
+            index: 0,
+            source_text: "In May 1968, the Sorbonne assembly adopted self-management.".to_string(),
+            target_text: "Em maio de 1968, a assembleia da Sorbonne adotou a autogestão.".to_string(),
+            ai_draft_snapshot: None,
+            status: SegmentStatus::Approved,
+            bbox: BoundingBox {
+                page: 1,
+                x: 0.1,
+                y: 0.1,
+                width: 0.8,
+                height: 0.1,
+            },
+        }];
+
+        let annotations = vec![SegmentTranslatorAnnotation {
+            segment_index: 0,
+            segment_id: "seg-1".to_string(),
+            editorial_stage: EditorialWorkflowStage::FinalCollationApproved,
+            internal_working_note: "NOTA INTERNA PRIVADA: confirmar com o editor se mantemos Sorbonne em itálico.".to_string(),
+            publishable_translator_footnote: "No original francês, 'autogestion' remete aos manifestos sindicais da CFDT de maio de 1968.".to_string(),
+        }];
+
+        let compiled_md =
+            AcrossConsistencyAndNotesEngine::compile_markdown_with_translator_footnotes(
+                &segments,
+                &annotations,
+            );
+
+        assert!(compiled_md.contains("adotou a autogestão.[^nt-1]"));
+        assert!(compiled_md.contains("### Notas da Tradução"));
+        assert!(compiled_md.contains("[^nt-1]: No original francês, 'autogestion' remete aos manifestos sindicais da CFDT de maio de 1968. [N. da T.]"));
+        assert!(
+            !compiled_md.contains("NOTA INTERNA PRIVADA"),
+            "Internal working notes must never leak into exported publication Markdown"
+        );
     }
 }

@@ -34,6 +34,10 @@ import {
   EpubChapterUnit,
   SubtitleCpsStatus,
   SubtitleCueDiagnostic,
+  EditorialWorkflowStage,
+  SegmentTranslatorAnnotation,
+  ConsistencyMatrixFinding,
+  ConsistencyMatrixReport,
 } from './types/amanuensis';
 
 const SAMPLE_SCANNED_PDFS = [
@@ -2008,6 +2012,193 @@ function analyzeSubtitlesCpsAndExport(
     exportedSrt: srtBlocks.join('\n\n'),
     exportedVtt: vttBlocks.join('\n\n'),
   };
+}
+
+// ============================================================================
+// ISSUE #6: ACROSS CROSS-CHAPTER CONSISTENCY MATRIX, [N.T.] NOTES & STAGES
+// ============================================================================
+function runCrossChapterConsistencyMatrix(
+  segments: TranslationSegment[],
+  glossary: GlossaryTerm[],
+  exceptions: ContextualExceptionRecord[]
+): ConsistencyMatrixReport {
+  const findings: ConsistencyMatrixFinding[] = [];
+  let targetInconsistenciesCount = 0;
+  let inverseCollisionsCount = 0;
+  let glossaryDriftsCount = 0;
+  let dialoguePunctuationDriftsCount = 0;
+
+  const bySource = new Map<string, Array<{ idx: number; tgt: string }>>();
+  const byTarget = new Map<string, Array<{ idx: number; src: string }>>();
+
+  segments.forEach((seg, idx) => {
+    const tgtTrim = seg.target_text.trim();
+    if (!tgtTrim) return;
+    const isExc = exceptions.some((e) => e.segment_index === idx);
+    if (!isExc) {
+      const normSrc = normalizeSegmentSourceForPropagation(seg.source_text);
+      const list = bySource.get(normSrc) || [];
+      list.push({ idx, tgt: tgtTrim });
+      bySource.set(normSrc, list);
+    }
+
+    const normTgt = normalizeSegmentSourceForPropagation(tgtTrim);
+    const tList = byTarget.get(normTgt) || [];
+    tList.push({ idx, src: seg.source_text.trim() });
+    byTarget.set(normTgt, tList);
+  });
+
+  bySource.forEach((occurrences) => {
+    if (occurrences.length >= 2) {
+      const firstNorm = normalizeSegmentSourceForPropagation(occurrences[0].tgt);
+      const hasDiv = occurrences.some(
+        (o) => normalizeSegmentSourceForPropagation(o.tgt) !== firstNorm
+      );
+      if (hasDiv) {
+        targetInconsistenciesCount++;
+        const indices = occurrences.map((o) => o.idx);
+        findings.push({
+          id: `qa-inconsist-${indices[0] + 1}`,
+          kind: 'TargetInconsistency',
+          severity_label: 'Alta • Inconsistência de Tradução',
+          affected_segment_indices: indices,
+          summary: `Mesmo original traduzido de formas diferentes nos Trechos #${indices
+            .map((i) => i + 1)
+            .join(', #')}`,
+          details: occurrences.map((o) => `Trecho #${o.idx + 1}: "${o.tgt}"`).join(' vs. '),
+          suggested_fix: occurrences[0].tgt,
+        });
+      }
+    }
+  });
+
+  byTarget.forEach((occurrences) => {
+    if (occurrences.length >= 2) {
+      const firstNormSrc = normalizeSegmentSourceForPropagation(occurrences[0].src);
+      const hasDistinct = occurrences.some(
+        (o) => normalizeSegmentSourceForPropagation(o.src) !== firstNormSrc
+      );
+      if (hasDistinct) {
+        inverseCollisionsCount++;
+        const indices = occurrences.map((o) => o.idx);
+        findings.push({
+          id: `qa-collision-${indices[0] + 1}`,
+          kind: 'InverseCollision',
+          severity_label: 'Média • Assimetria Inversa (Colisão)',
+          affected_segment_indices: indices,
+          summary: `Frases originais distintas traduzidas de forma idêntica nos Trechos #${indices
+            .map((i) => i + 1)
+            .join(', #')}`,
+          details: occurrences.map((o) => `Orig #${o.idx + 1}: "${o.src}"`).join(' ≠ '),
+          suggested_fix: 'Diferenciar nuance lexical conforme o original de cada trecho.',
+        });
+      }
+    }
+  });
+
+  segments.forEach((seg, idx) => {
+    const tgt = seg.target_text.trim();
+    if (!tgt) return;
+    const lowSrc = seg.source_text.toLowerCase();
+    const lowTgt = tgt.toLowerCase();
+    glossary.forEach((g) => {
+      if (lowSrc.includes(g.source_term.toLowerCase())) {
+        const expected = g.do_not_translate ? g.source_term : g.target_term;
+        if (!lowTgt.includes(expected.toLowerCase())) {
+          glossaryDriftsCount++;
+          findings.push({
+            id: `qa-gloss-${idx + 1}-${g.source_term}`,
+            kind: 'GlossaryDrift',
+            severity_label: 'Alta • Desvio de Glossário entre Capítulos',
+            affected_segment_indices: [idx],
+            summary: `Trecho #${idx + 1}: termo travado "${g.source_term}" não usou "${expected}"`,
+            details: `O original exige "${g.source_term} → ${expected}", ausente na tradução atual.`,
+            suggested_fix: expected,
+          });
+        }
+      }
+    });
+  });
+
+  const emdashSegs: number[] = [];
+  const quoteSegs: number[] = [];
+  segments.forEach((seg, idx) => {
+    const tgt = seg.target_text.trim();
+    if (tgt.startsWith('—') || tgt.startsWith('--')) {
+      emdashSegs.push(idx);
+    } else if (tgt.startsWith('"') || tgt.startsWith('“') || tgt.startsWith('«')) {
+      quoteSegs.push(idx);
+    }
+  });
+
+  const dominantDialogueStyle =
+    emdashSegs.length >= quoteSegs.length
+      ? 'Travessão Editorial ABNT (—)'
+      : 'Aspas de Diálogo (“...”)';
+
+  if (emdashSegs.length > 0 && quoteSegs.length > 0) {
+    dialoguePunctuationDriftsCount = quoteSegs.length;
+    findings.push({
+      id: 'qa-dialogue-punctuation-drift',
+      kind: 'DialoguePunctuationDrift',
+      severity_label: 'Média • Oscilação de Pontuação de Diálogo',
+      affected_segment_indices: [...emdashSegs, ...quoteSegs],
+      summary: `Oscilação entre Travessão (— em ${emdashSegs.length} trechos) e Aspas ("..." em ${quoteSegs.length} trechos)`,
+      details:
+        'Obras editoriais em língua portuguesa exigem padronização uniforme de diálogos com travessão (—).',
+      suggested_fix: 'Converter abertura de diálogo com aspas para travessão editorial (— ).',
+    });
+  }
+
+  const totalIssues =
+    targetInconsistenciesCount +
+    inverseCollisionsCount +
+    glossaryDriftsCount +
+    dialoguePunctuationDriftsCount;
+  const consistencyScorePct = Math.max(25, 100 - Math.min(75, totalIssues * 9));
+
+  return {
+    total_segments_checked: segments.length,
+    consistency_score_pct: consistencyScorePct,
+    target_inconsistencies_count: targetInconsistenciesCount,
+    inverse_collisions_count: inverseCollisionsCount,
+    glossary_drifts_count: glossaryDriftsCount,
+    dialogue_punctuation_drifts_count: dialoguePunctuationDriftsCount,
+    dominant_dialogue_style: dominantDialogueStyle,
+    findings,
+  };
+}
+
+function compileMarkdownWithTranslatorFootnotes(
+  segments: TranslationSegment[],
+  annotations: Record<number, SegmentTranslatorAnnotation>
+): string {
+  const bodyBlocks: string[] = [];
+  const footnoteDefs: string[] = [];
+  let ntCounter = 0;
+
+  segments.forEach((seg, idx) => {
+    let text = seg.target_text.trim() ? seg.target_text.trim() : seg.source_text.trim();
+    const ann = annotations[idx];
+    if (ann && ann.publishable_translator_footnote.trim()) {
+      ntCounter++;
+      const fnId = `[^nt-${ntCounter}]`;
+      text += fnId;
+      const rawNote = ann.publishable_translator_footnote.trim();
+      const formattedNote =
+        rawNote.endsWith('[N. da T.]') || rawNote.endsWith('[N.T.]')
+          ? rawNote
+          : `${rawNote} [N. da T.]`;
+      footnoteDefs.push(`${fnId}: ${formattedNote}`);
+    }
+    bodyBlocks.push(text);
+  });
+
+  let finalMd = bodyBlocks.join('\n\n');
+  if (footnoteDefs.length > 0) {
+    finalMd += `\n\n---\n\n### Notas da Tradução\n\n${footnoteDefs.join('\n')}\n`;
+  }
+  return finalMd;
 }
 
 const INITIAL_AGENT_MD = `# AGENT.md — Project Translation Harness: Tratado de Tradução & Humanidades
@@ -5266,6 +5457,123 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
     }
   }, [subtitleCpsReport.diagnostics, activeModel.name, glossary, learnedRules]);
 
+  // ============================================================================
+  // ISSUE #6: MATRIZ DE CONSISTÊNCIA INTRA-OBRA (ACROSS QA SEM LOCK-IN),
+  // NOTAS DO TRADUTOR [N.T.] PUBLICÁVEIS & ESTÁGIOS EDITORIAIS SEM BUROCRACIA
+  // ============================================================================
+  const [showConsistencyMatrixDrawer, setShowConsistencyMatrixDrawer] = useState<boolean>(false);
+  const [openTranslatorNotesIdx, setOpenTranslatorNotesIdx] = useState<number | null>(null);
+  const [segmentAnnotations, setSegmentAnnotations] = useState<
+    Record<number, SegmentTranslatorAnnotation>
+  >({
+    0: {
+      segment_index: 0,
+      segment_id: 'seg-1',
+      editorial_stage: 'FinalCollationApproved',
+      internal_working_note:
+        'Confirmado na edição crítica francesa de 2008 (Xavier Vigna, p. 14).',
+      publishable_translator_footnote: '',
+      updated_at: '2026-11-04 16:40 UTC',
+    },
+    1: {
+      segment_index: 1,
+      segment_id: 'seg-2',
+      editorial_stage: 'CopyeditingPreparation',
+      internal_working_note:
+        'Mantive "greve geral selvagem" em vez de "greve espontânea" para preservar o vocabulário sindical autonomista de 1968.',
+      publishable_translator_footnote:
+        'No original francês, "grève sauvage" designa as paralisações deflagradas pelas bases operárias sem aviso prévio ou chancela das centrais sindicais.',
+      updated_at: '2026-11-04 16:45 UTC',
+    },
+  });
+
+  const consistencyMatrixReport = useMemo(
+    () => runCrossChapterConsistencyMatrix(segments, glossary, contextualExceptions),
+    [segments, glossary, contextualExceptions]
+  );
+
+  const handleUpdateSegmentAnnotation = useCallback(
+    (idx: number, patch: Partial<SegmentTranslatorAnnotation>) => {
+      const seg = segments[idx];
+      if (!seg) return;
+      const now = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+      setSegmentAnnotations((prev) => {
+        const existing = prev[idx] || {
+          segment_index: idx,
+          segment_id: seg.id,
+          editorial_stage: 'DraftTranslation' as EditorialWorkflowStage,
+          internal_working_note: '',
+          publishable_translator_footnote: '',
+          updated_at: now,
+        };
+        return {
+          ...prev,
+          [idx]: {
+            ...existing,
+            ...patch,
+            updated_at: now,
+          },
+        };
+      });
+    },
+    [segments]
+  );
+
+  const handleAutoFixConsistencyFinding = useCallback(
+    (finding: ConsistencyMatrixFinding) => {
+      if (finding.kind === 'DialoguePunctuationDrift') {
+        setSegments((prev) =>
+          prev.map((seg, i) => {
+            if (!finding.affected_segment_indices.includes(i)) return seg;
+            const standardized = seg.target_text
+              .replace(/^["“”«»]\s*/, '— ')
+              .replace(/["“”«»]$/, '');
+            return { ...seg, target_text: standardized };
+          })
+        );
+        setStatusNotice(
+          `✨ Travessão editorial (—) padronizado automaticamente nos trechos #${finding.affected_segment_indices
+            .map((i) => i + 1)
+            .join(', #')}!`
+        );
+        return;
+      }
+
+      if (finding.kind === 'GlossaryDrift') {
+        const targetIdx = finding.affected_segment_indices[0];
+        if (typeof targetIdx === 'number') {
+          setActiveSegIdx(targetIdx);
+          setStatusNotice(
+            `📌 Navegado para o Trecho #${
+              targetIdx + 1
+            }. Use o botão do glossário na barra do trecho para aplicar "${finding.suggested_fix}"!`
+          );
+        }
+        return;
+      }
+
+      if (finding.kind === 'TargetInconsistency' && finding.affected_segment_indices.length >= 2) {
+        const canonicalIdx = finding.affected_segment_indices[0];
+        const canonicalTarget = segments[canonicalIdx]?.target_text;
+        if (canonicalTarget) {
+          setSegments((prev) =>
+            prev.map((seg, i) =>
+              finding.affected_segment_indices.includes(i)
+                ? { ...seg, target_text: canonicalTarget }
+                : seg
+            )
+          );
+          setStatusNotice(
+            `🔁 Tradução unificada nos trechos #${finding.affected_segment_indices
+              .map((i) => i + 1)
+              .join(', #')} (ou marque 🔀 Exceção Contextual se a variação for intencional)!`
+          );
+        }
+      }
+    },
+    [segments]
+  );
+
   const handleConfirmAndEvolveHarness = useCallback(
     (idx: number) => {
       const seg = segments[idx];
@@ -5759,12 +6067,17 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
   }, [ocrFormattingResult, uploadedPdfName]);
 
   const handleExportTranslatedMarkdown = useCallback(() => {
-    const md = segments
-      .map((s) => (s.target_text.trim() ? s.target_text : s.source_text))
-      .join('\n\n');
+    const md = compileMarkdownWithTranslatorFootnotes(segments, segmentAnnotations);
     downloadTextFile('amanuensis_traducao.md', md, 'text/markdown;charset=utf-8');
-    setStatusNotice('⬇ Documento traduzido exportado como Markdown (.md)!');
-  }, [segments]);
+    const publishedNotesCount = Object.values(segmentAnnotations).filter(
+      (a) => a.publishable_translator_footnote.trim().length > 0
+    ).length;
+    setStatusNotice(
+      publishedNotesCount > 0
+        ? `⬇ Documento traduzido exportado como Markdown (.md) com ${publishedNotesCount} Nota(s) do Tradutor [N. da T.] compiladas no rodapé (Notas de Trabalho Internas omitidas)!`
+        : '⬇ Documento traduzido exportado como Markdown (.md)!'
+    );
+  }, [segments, segmentAnnotations]);
 
   // ============================================================================
   // GERENCIADOR FIEL DE MODELOS LOCAIS (Download, Apagar c/ Caches, Custom llama.cpp & Scanner)
@@ -10062,6 +10375,14 @@ ${adr.adopted_decision}
                 </button>
                 <button
                   className="btn"
+                  style={{ fontSize: '0.72rem', padding: '2px 7px' }}
+                  onClick={() => setShowConsistencyMatrixDrawer((prev) => !prev)}
+                  title="Matriz de Consistência Terminológica Intra-Obra (Across QA Sem Lock-in), Notas do Tradutor [N. da T.] Publicáveis & Estágios Editoriais"
+                >
+                  📊 Matriz QA & [N.T.] ({consistencyMatrixReport.consistency_score_pct}%)
+                </button>
+                <button
+                  className="btn"
                   onClick={() => setZenMode(true)}
                   title="Ativar Modo Zen para foco criativo sem estímulos de tela (⌘\)"
                 >
@@ -10079,6 +10400,203 @@ ${adr.adopted_decision}
               </div>
             </div>
             <div className="pane-body">
+              {/* Issue #6: Cross-Chapter Consistency Matrix, Translator Footnotes [N. da T.] & Non-Locking Editorial Stages (Across Inspired) */}
+              {showConsistencyMatrixDrawer && (
+                <div
+                  className="card"
+                  style={{
+                    marginBottom: '10px',
+                    border: '2px solid var(--accent)',
+                    background: 'var(--page-canvas)',
+                  }}
+                >
+                  <div className="card-title" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                    <span>
+                      📊 Matriz de Consistência Intra-Obra, Notas do Tradutor [N. da T.] & Estágios
+                      Editoriais Sem Lock-in (Inspirado no Across)
+                    </span>
+                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <span className="badge badge-exact">
+                        🎯 Score de Consistência: {consistencyMatrixReport.consistency_score_pct}%
+                      </span>
+                      <span className="badge badge-accent">
+                        🔁 Inconsistências de Alvo: {consistencyMatrixReport.target_inconsistencies_count}
+                      </span>
+                      <span className="badge badge-fuzzy">
+                        💥 Colisões Inversas: {consistencyMatrixReport.inverse_collisions_count}
+                      </span>
+                      <span className="badge badge-fuzzy">
+                        📌 Desvios de Glossário: {consistencyMatrixReport.glossary_drifts_count}
+                      </span>
+                      <span className="badge badge-accent">
+                        💬 Pontuação de Diálogo: {consistencyMatrixReport.dialogue_punctuation_drifts_count}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: '0.71rem', padding: '2px 8px' }}
+                        onClick={() => setShowConsistencyMatrixDrawer(false)}
+                      >
+                        ✕ Fechar
+                      </button>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      fontSize: '0.74rem',
+                      color: 'var(--text-muted)',
+                      marginBottom: '8px',
+                    }}
+                  >
+                    Auditoria global sem burocracia e sem bloqueio de edição: detecta frases idênticas
+                    traduzidas de formas diferentes sem marcação de <code>🔀 Exceção Contextual</code>,
+                    colisões inversas, termos do glossário omitidos e mistura de travessão (<code>—</code>)
+                    com aspas (<code>"..."</code>) entre capítulos. Também lista todas as{' '}
+                    <strong>Notas do Tradutor [N. da T.]</strong> publicáveis e{' '}
+                    <strong>Notas de Trabalho Internas</strong> da obra.
+                  </div>
+
+                  {consistencyMatrixReport.findings.length === 0 ? (
+                    <div
+                      style={{
+                        padding: '8px',
+                        background: 'var(--surface)',
+                        border: '1px solid var(--success)',
+                        fontSize: '0.76rem',
+                        marginBottom: '8px',
+                      }}
+                    >
+                      ✅ <strong>100% Consistente!</strong> Nenhuma inconsistência de alvo, colisão
+                      inversa, desvio de glossário ou deriva de pontuação de diálogo encontrada na obra.
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '6px',
+                        maxHeight: '210px',
+                        overflowY: 'auto',
+                        marginBottom: '8px',
+                      }}
+                    >
+                      {consistencyMatrixReport.findings.map((finding, fIdx) => (
+                        <div
+                          key={fIdx}
+                          style={{
+                            padding: '6px 8px',
+                            background: 'var(--surface)',
+                            border: '1px solid var(--border-dark)',
+                            fontSize: '0.74rem',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: '8px',
+                            flexWrap: 'wrap',
+                          }}
+                        >
+                          <div style={{ flex: 1, minWidth: '240px' }}>
+                            <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                              <span
+                                className={`badge ${
+                                  finding.kind === 'GlossaryDrift' || finding.kind === 'TargetInconsistency'
+                                    ? 'badge-fuzzy'
+                                    : 'badge-accent'
+                                }`}
+                              >
+                                {finding.kind === 'TargetInconsistency'
+                                  ? '🔁 Inconsistência de Alvo'
+                                  : finding.kind === 'InverseCollision'
+                                  ? '💥 Colisão Inversa'
+                                  : finding.kind === 'GlossaryDrift'
+                                  ? '📌 Desvio de Glossário'
+                                  : '💬 Deriva de Diálogo'}
+                              </span>
+                              <strong>{finding.summary}</strong>
+                            </div>
+                            <div style={{ marginTop: '3px' }}>{finding.details}</div>
+                            <div style={{ fontSize: '0.69rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                              💡 Sugestão: {finding.suggested_fix}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ fontSize: '0.68rem', padding: '2px 7px' }}
+                              onClick={() => {
+                                if (finding.affected_segment_indices.length > 0) {
+                                  setActiveSegIdx(finding.affected_segment_indices[0]);
+                                }
+                              }}
+                            >
+                              🔍 Ir p/ Trecho #{(finding.affected_segment_indices[0] ?? 0) + 1}
+                            </button>
+                            {(finding.kind === 'DialoguePunctuationDrift' ||
+                              finding.kind === 'TargetInconsistency' ||
+                              finding.kind === 'GlossaryDrift') && (
+                              <button
+                                type="button"
+                                className="btn btn-primary"
+                                style={{ fontSize: '0.68rem', padding: '2px 7px' }}
+                                onClick={() => handleAutoFixConsistencyFinding(finding)}
+                              >
+                                ⚡ Padronizar 1-Click
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Summary of Translator Footnotes [N. da T.] & Editorial Workflow Stages */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      gap: '6px',
+                      paddingTop: '6px',
+                      borderTop: '1px solid var(--border-dark)',
+                      fontSize: '0.73rem',
+                    }}
+                  >
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+                      <strong>📝 Notas & Estágios Editoriais Ativos:</strong>
+                      <span className="badge badge-exact">
+                        📌{' '}
+                        {
+                          Object.values(segmentAnnotations).filter(
+                            (a) => a.publishable_translator_footnote.trim().length > 0
+                          ).length
+                        }{' '}
+                        Nota(s) [N. da T.] Publicáveis no Rodapé
+                      </span>
+                      <span className="badge badge-accent">
+                        🔒{' '}
+                        {
+                          Object.values(segmentAnnotations).filter(
+                            (a) => a.internal_working_note.trim().length > 0
+                          ).length
+                        }{' '}
+                        Nota(s) de Trabalho Internas (Privadas)
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-success"
+                      style={{ fontSize: '0.7rem', padding: '2px 8px' }}
+                      onClick={handleExportTranslatedMarkdown}
+                    >
+                      ⬇ Exportar Markdown (.md) c/ Rodapés [N. da T.]
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Issue #5: Bilingual .docx Review Round-Trip (Trados) + .epub Chain Files & .srt/.vtt CPS Validator (Wordfast) */}
               {showBilingualReviewDrawer && (
                 <div
@@ -11220,6 +11738,65 @@ ${adr.adopted_decision}
                                 ⚠️ {w}
                               </span>
                             ))}
+
+                          {/* Issue #6: Non-Locking Editorial Stage Selector + Dual Translator Notes ([N. da T.] + Internal Working Note) */}
+                          {(() => {
+                            const ann = segmentAnnotations[idx];
+                            const stage: EditorialWorkflowStage =
+                              ann?.editorial_stage || 'DraftTranslation';
+                            const hasPubNote =
+                              (ann?.publishable_translator_footnote || '').trim().length > 0;
+                            const hasIntNote =
+                              (ann?.internal_working_note || '').trim().length > 0;
+
+                            return (
+                              <>
+                                <select
+                                  className="select-pill"
+                                  style={{ fontSize: '0.67rem', padding: '1px 5px' }}
+                                  value={stage}
+                                  title="Estágio Editorial Sem Lock-in (Across): você sempre pode editar livremente qualquer trecho em qualquer estágio!"
+                                  onClick={(e) => e.stopPropagation()}
+                                  onChange={(e) => {
+                                    e.stopPropagation();
+                                    handleUpdateSegmentAnnotation(idx, {
+                                      editorial_stage: e.target.value as EditorialWorkflowStage,
+                                    });
+                                  }}
+                                >
+                                  <option value="DraftTranslation">1. Tradução Inicial</option>
+                                  <option value="CopyeditingPreparation">
+                                    2. Preparação & Revisão
+                                  </option>
+                                  <option value="FinalCollationApproved">
+                                    3. Cotejo Final Aprovado
+                                  </option>
+                                </select>
+
+                                <button
+                                  type="button"
+                                  className={`badge ${
+                                    hasPubNote
+                                      ? 'badge-exact'
+                                      : hasIntNote
+                                      ? 'badge-accent'
+                                      : ''
+                                  } badge-btn`}
+                                  title="Abrir Notas deste Trecho: Nota do Tradutor Publicável [N. da T.] (vai para o rodapé na exportação) e Nota de Trabalho Interna (privada para o revisor/editor)"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setOpenTranslatorNotesIdx((prev) =>
+                                      prev === idx ? null : idx
+                                    );
+                                  }}
+                                >
+                                  📝 Notas [N.T.]
+                                  {hasPubNote ? ' 📌[N. da T.]' : ''}
+                                  {hasIntNote ? ' 🔒Interna' : ''}
+                                </button>
+                              </>
+                            );
+                          })()}
                         </div>
 
                         <div style={{ display: 'flex', gap: '6px' }}>
@@ -11338,6 +11915,104 @@ ${adr.adopted_decision}
                                 </div>
                               </div>
                             ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Issue #6: Inline Dual Translator Notes Drawer ([N. da T.] Publicável + Nota de Trabalho Interna) */}
+                      {openTranslatorNotesIdx === idx && (
+                        <div
+                          className="card"
+                          style={{
+                            marginTop: '6px',
+                            border: '2px solid var(--accent)',
+                            background: 'var(--page-canvas)',
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div className="card-title" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                            <span>
+                              📝 Notas do Tradutor [N. da T.] & Nota de Trabalho Interna — Trecho #
+                              {idx + 1}
+                            </span>
+                            <button
+                              type="button"
+                              className="btn"
+                              style={{ fontSize: '0.7rem', padding: '1px 7px' }}
+                              onClick={() => setOpenTranslatorNotesIdx(null)}
+                            >
+                              ✕ Fechar
+                            </button>
+                          </div>
+                          <div
+                            style={{
+                              display: 'grid',
+                              gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                              gap: '8px',
+                            }}
+                          >
+                            <div>
+                              <label
+                                style={{
+                                  display: 'block',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 700,
+                                  marginBottom: '4px',
+                                }}
+                              >
+                                📌 Nota do Tradutor Publicável (<code>[N. da T.]</code> no Rodapé
+                                Exportado):
+                              </label>
+                              <textarea
+                                className="input"
+                                rows={3}
+                                style={{ width: '100%', fontSize: '0.74rem' }}
+                                placeholder="Ex.: No original francês, 'grève sauvage' designa paralisações deflagradas pelas bases sem chancela sindical..."
+                                value={
+                                  segmentAnnotations[idx]?.publishable_translator_footnote || ''
+                                }
+                                onChange={(e) =>
+                                  handleUpdateSegmentAnnotation(idx, {
+                                    publishable_translator_footnote: e.target.value,
+                                  })
+                                }
+                              />
+                              <div style={{ fontSize: '0.67rem', color: 'var(--text-muted)' }}>
+                                Compilada automaticamente como nota de rodapé real (
+                                <code>[^nt-N]: ... [N. da T.]</code>) ao exportar o livro em{' '}
+                                <code>.md</code> ou <code>.docx</code>.
+                              </div>
+                            </div>
+
+                            <div>
+                              <label
+                                style={{
+                                  display: 'block',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 700,
+                                  marginBottom: '4px',
+                                }}
+                              >
+                                🔒 Nota de Trabalho Interna (Privada p/ Tradutor, Preparador ou
+                                Autor):
+                              </label>
+                              <textarea
+                                className="input"
+                                rows={3}
+                                style={{ width: '100%', fontSize: '0.74rem' }}
+                                placeholder="Ex.: Dúvida p/ o editor: mantemos o termo em itálico ou aportuguesamos conforme o cap. 2?"
+                                value={segmentAnnotations[idx]?.internal_working_note || ''}
+                                onChange={(e) =>
+                                  handleUpdateSegmentAnnotation(idx, {
+                                    internal_working_note: e.target.value,
+                                  })
+                                }
+                              />
+                              <div style={{ fontSize: '0.67rem', color: 'var(--text-muted)' }}>
+                                Visível na revisão bilíngue (<code>.docx</code>) e no cofre
+                                Obsidian, mas <strong>jamais</strong> vaza para a publicação final.
+                              </div>
+                            </div>
                           </div>
                         </div>
                       )}
