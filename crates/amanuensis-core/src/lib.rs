@@ -1,5 +1,6 @@
 pub mod git_story;
 pub mod harness;
+pub mod livedocs;
 pub mod llm;
 pub mod obsidian;
 pub mod ocr;
@@ -742,5 +743,129 @@ Maio francês: quando os operários e estudantes desafiaram o poder em 1968 (Rev
         assert!(report2
             .merged_markdown
             .contains("Conferir epígrafe com a edição francesa"));
+    }
+
+    #[test]
+    fn test_livecorpus_zero_config_bilingual_and_monolingual_expanded_context() {
+        use crate::livedocs::{LiveCorpusDocKind, LiveCorpusEngine};
+
+        let mut engine = LiveCorpusEngine::new();
+        let src_doc = "En las fábricas metalúrgicas de Boulogne-Billancourt en 1968, los comités de base organizaron asambleas permanentes.\n\nCuando obreros y estudiantes desafiaron al poder establecido, las universidades abrieron sus puertas a los sindicatos.\n\nEl reflujo electoral de junio de 1968 no borró la transformación cultural y política de toda una generación.";
+        let tgt_doc = "Nas fábricas metalúrgicas de Boulogne-Billancourt em 1968, os comitês de base organizaram assembleias permanentes.\n\nQuando operários e estudantes desafiaram o poder estabelecido, as universidades abriram suas portas aos sindicatos.\n\nO refluxo eleitoral de junho de 1968 não apagou a transformação cultural e política de toda uma geração.";
+
+        let aligned = engine.ingest_bilingual_pair_zero_config(
+            "doc-vigna-1968",
+            "Xavier Vigna — Historia Obrera de 1968 (Par Original + Tradução Antiga)",
+            "vigna_1968_bilingue.pdf",
+            "es-ES",
+            "pt-BR",
+            src_doc,
+            tgt_doc,
+        );
+        assert_eq!(aligned.len(), 3);
+        assert!(aligned[1].alignment_confidence >= 0.85);
+
+        // Verify Expanded 3-Paragraph Context Inspection (¶ Anterior + ¶ Atual + ¶ Posterior)
+        let ctx = engine.inspect_expanded_context("doc-vigna-1968-p2").unwrap();
+        assert!(ctx
+            .prev_paragraph
+            .as_ref()
+            .unwrap()
+            .contains("Boulogne-Billancourt"));
+        assert!(ctx
+            .source_paragraph
+            .contains("Cuando obreros y estudiantes desafiaron al poder"));
+        assert!(ctx
+            .target_paragraph
+            .as_ref()
+            .unwrap()
+            .contains("Quando operários e estudantes desafiaram o poder"));
+        assert!(ctx
+            .next_paragraph
+            .as_ref()
+            .unwrap()
+            .contains("El reflujo electoral de junio de 1968"));
+
+        // Monolingual target reference ingestion
+        let mono = engine.ingest_monolingual_reference(
+            "doc-mono-pt",
+            "Ensaio Brasileiro sobre Maio de 1968 (Referência Monolíngue PT-BR)",
+            "ensaio_maio_68_ptbr.md",
+            LiveCorpusDocKind::MonolingualTargetReference,
+            "pt-BR",
+            "Parágrafo introdutório sobre a historiografia brasileira.\n\nA greve geral articulou comitês de fábrica e ocupações estudantis.\n\nConclusão sobre o legado editorial.",
+        );
+        assert_eq!(mono.len(), 3);
+        assert!(mono[1].prev_paragraph.is_some());
+        assert!(mono[1].next_paragraph.is_some());
+    }
+
+    #[test]
+    fn test_longest_substring_concordance_lsc_under_50_pct_global_similarity() {
+        use crate::livedocs::{LiveCorpusDocKind, LiveCorpusEngine};
+
+        let mut engine = LiveCorpusEngine::new();
+        engine.add_subsegment_equivalence(
+            "institutional trust and historical accountability",
+            "confiança institucional e responsabilização histórica",
+        );
+        engine.add_subsegment_equivalence(
+            "obreros y estudiantes desafiaron al poder",
+            "operários e estudantes desafiaram o poder",
+        );
+
+        engine.ingest_monolingual_reference(
+            "doc-author-prior",
+            "Obra Anterior do Autor (Comparative Political Sociology, 2021)",
+            "prior_work_2021.pdf",
+            LiveCorpusDocKind::AuthorPriorWork,
+            "en-US",
+            "Introductory remarks on post-war European constitutionalism.\n\nEarlier empirical surveys demonstrated that institutional trust and historical accountability remain essential pillars during fiscal crises in municipal governance.\n\nSubsequent chapters examine regional electoral volatility.",
+        );
+
+        // New sentence with < 50% global word overlap, but sharing a 5-word contiguous n-gram!
+        let active_segment = "Modern welfare states depend on institutional trust and historical accountability across diverse populations.";
+        let hits = engine.find_longest_substring_concordances(active_segment, 2);
+
+        assert!(!hits.is_empty());
+        let top_hit = &hits[0];
+        assert_eq!(
+            top_hit.source_ngram,
+            "institutional trust and historical accountability"
+        );
+        assert_eq!(top_hit.word_count, 5);
+        assert!(
+            top_hit.global_sentence_similarity_pct < 50.0,
+            "Expected < 50% global similarity to prove LSC works where fuzzy TM fails, got {}%",
+            top_hit.global_sentence_similarity_pct
+        );
+        assert_eq!(
+            top_hit.suggested_target_phrase.as_deref(),
+            Some("confiança institucional e responsabilização histórica")
+        );
+        assert!(top_hit.prev_paragraph.is_some());
+        assert!(top_hit.next_paragraph.is_some());
+    }
+
+    #[test]
+    fn test_livecorpus_manifest_persistence_in_amanuensis_corpus_dir() {
+        use crate::livedocs::{LiveCorpusDocKind, LiveCorpusEngine};
+
+        let tmp_dir = std::env::temp_dir().join("amanuensis_test_livecorpus_disk");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        let mut engine = LiveCorpusEngine::new();
+        engine.ingest_monolingual_reference(
+            "doc-1",
+            "Obra Anterior",
+            "obra.md",
+            LiveCorpusDocKind::AuthorPriorWork,
+            "es-ES",
+            "Primer párrafo.\n\nSegundo párrafo con contexto.",
+        );
+        let saved = engine.save_corpus_manifest_to_disk(&tmp_dir).unwrap();
+        assert!(saved.exists());
+        assert!(saved.to_string_lossy().contains(".amanuensis/corpus/LIVECORPUS_MANIFEST.json"));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

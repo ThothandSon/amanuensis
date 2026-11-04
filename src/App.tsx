@@ -17,6 +17,10 @@ import {
   CanvasNode,
   CanvasEdge,
   ObsidianVaultNote,
+  LiveCorpusDocKind,
+  LiveCorpusPassage,
+  LiveCorpusDocumentSpec,
+  LscSubphraseMatch,
 } from './types/amanuensis';
 
 const SAMPLE_SCANNED_PDFS = [
@@ -859,6 +863,386 @@ function validateObsidianNoteGates(
     preservedUserNotes,
     updatedSegments,
     errors,
+  };
+}
+
+// ============================================================================
+// ISSUE #2: LIVECORPUS (.amanuensis/corpus/) & LONGEST SUBSTRING CONCORDANCE (LSC)
+// ============================================================================
+const SUBSEGMENT_MUSE_LEXICON: Record<string, string> = {
+  'small local language models': 'modelos de linguagem locais compactos',
+  'remarkable translation fidelity': 'notável fidelidade de tradução',
+  'constrained by a project-specific harness': 'restritos por um harness específico do projeto',
+  'project-specific harness': 'harness específico do projeto',
+  'auxiliary translation memory': 'Memória de Tradução auxiliar',
+  'domain-specific glossaries': 'glossários específicos de domínio',
+  'contextual grounding': 'ancoragem contextual',
+  'terminology drift and hallucination': 'desvio terminológico e alucinação',
+  'long technical manuscripts': 'manuscritos técnicos extensos',
+  'historical scans processed': 'digitalizações históricas processadas',
+  'bounding-box coordinates and searchable pdf text layers':
+    'coordenadas de bounding-box e camadas de texto em PDF pesquisável',
+  'searchable pdf text layers': 'camadas de texto em PDF pesquisável',
+  'modern welfare states': 'Estados de Bem-Estar Social modernos',
+  'institutional trust and historical accountability':
+    'confiança institucional e responsabilização histórica',
+  'democratic institutions and social cohesion':
+    'instituições democráticas e coesão social',
+  'cuando obreros y estudiantes desafiaron al poder':
+    'quando operários e estudantes desafiaram o poder',
+  'obreros y estudiantes desafiaron al poder': 'operários e estudantes desafiaram o poder',
+  'ocupación de la fábrica citroen en mayo de 1968':
+    'ocupação da fábrica Citroën em maio de 1968',
+  'reflexiones y documentos': 'reflexões e documentos',
+};
+
+const INITIAL_LIVECORPUS_DOCS: LiveCorpusDocumentSpec[] = [
+  {
+    id: 'corpus-bilingue-vigna-1968',
+    title:
+      'Xavier Vigna & Coletivo — Mayo Francés (1968) + Tradução Antiga (Alinhado Automaticamente sem TMX)',
+    filename: 'vigna_mayo_frances_1968_par_bilingue.pdf',
+    kind: 'BilingualAutoAligned',
+    source_lang: 'es-ES / en-US',
+    target_lang: 'pt-BR',
+    passage_count: 4,
+    avg_alignment_confidence: 0.96,
+    passages: [
+      {
+        id: 'corpus-bilingue-vigna-1968-p1',
+        doc_id: 'corpus-bilingue-vigna-1968',
+        doc_title:
+          'Xavier Vigna & Coletivo — Mayo Francés (1968) + Tradução Antiga (Alinhado Automaticamente)',
+        doc_kind: 'BilingualAutoAligned',
+        paragraph_index: 0,
+        prev_paragraph:
+          'Prefacio a la edición sudamericana: Los archivos sindicales de 1968 revelan una convergencia inédita entre talleres mecánicos y facultades universitarias.',
+        source_paragraph:
+          'En las jornadas de París y Nanterre, cuando obreros y estudiantes desafiaron al poder mediante asambleas horizontales, la ocupación de la fábrica Citroen en mayo de 1968 transformó las reflexiones y documentos de toda la izquierda europea.',
+        target_paragraph:
+          'Nas jornadas de Paris e Nanterre, quando operários e estudantes desafiaram o poder mediante assembleias horizontais, a ocupação da fábrica Citroën em maio de 1968 transformou as reflexões e documentos de toda a esquerda europeia.',
+        next_paragraph:
+          'Los comités de huelga rechazaron los acuerdos preliminares de Grenelle y exigieron control obrero sobre los ritmos de montaje.',
+        alignment_confidence: 0.97,
+      },
+      {
+        id: 'corpus-bilingue-vigna-1968-p2',
+        doc_id: 'corpus-bilingue-vigna-1968',
+        doc_title:
+          'Xavier Vigna & Coletivo — Mayo Francés (1968) + Tradução Antiga (Alinhado Automaticamente)',
+        doc_kind: 'BilingualAutoAligned',
+        paragraph_index: 1,
+        prev_paragraph:
+          'Section 1.2: Computational Philology and Archival Digitization in University Presses.',
+        source_paragraph:
+          'Empirical benchmarks in editorial laboratories confirm that small local language models reach remarkable translation fidelity whenever constrained by a project-specific harness and an auxiliary Translation Memory during archival editions.',
+        target_paragraph:
+          'Benchmarks empíricos em laboratórios editoriais confirmam que modelos de linguagem locais compactos alcançam notável fidelidade de tradução sempre que restritos por um harness específico do projeto e uma Memória de Tradução auxiliar durante edições de arquivo.',
+        next_paragraph:
+          'Conversely, cloud APIs lacking local glossary enforcement frequently alter historical terminology across chapters.',
+        alignment_confidence: 0.96,
+      },
+      {
+        id: 'corpus-bilingue-vigna-1968-p3',
+        doc_id: 'corpus-bilingue-vigna-1968',
+        doc_title:
+          'Xavier Vigna & Coletivo — Mayo Francés (1968) + Tradução Antiga (Alinhado Automaticamente)',
+        doc_kind: 'BilingualAutoAligned',
+        paragraph_index: 2,
+        prev_paragraph:
+          'Previous studies on neural decoding highlighted the risk of lexical inconsistency in philosophical treatises.',
+        source_paragraph:
+          'In the absence of domain-specific glossaries and contextual grounding, neural decoders exhibit severe terminology drift and hallucination across long technical manuscripts and critical editions.',
+        target_paragraph:
+          'Na ausência de glossários específicos de domínio e ancoragem contextual, decodificadores neurais exibem severo desvio terminológico e alucinação ao longo de manuscritos técnicos extensos e edições críticas.',
+        next_paragraph:
+          'Therefore, deterministic post-editing rules must be persisted in the local project repository.',
+        alignment_confidence: 0.95,
+      },
+      {
+        id: 'corpus-bilingue-vigna-1968-p4',
+        doc_id: 'corpus-bilingue-vigna-1968',
+        doc_title:
+          'Xavier Vigna & Coletivo — Mayo Francés (1968) + Tradução Antiga (Alinhado Automaticamente)',
+        doc_kind: 'BilingualAutoAligned',
+        paragraph_index: 3,
+        prev_paragraph:
+          'Archival preservation protocols require non-destructive optical recognition of renaissance and twentieth-century folios.',
+        source_paragraph:
+          'All historical scans processed by university scriptoria must preserve bounding-box coordinates and searchable PDF text layers for scholarly verification.',
+        target_paragraph:
+          'Todas as digitalizações históricas processadas por scriptoria universitários devem preservar coordenadas de bounding-box e camadas de texto em PDF pesquisável para verificação acadêmica.',
+        next_paragraph:
+          'Appendix B details the PDFKit and Apple Vision coordinate mapping pipeline.',
+        alignment_confidence: 0.96,
+      },
+    ],
+  },
+  {
+    id: 'corpus-author-prior-2021',
+    title: 'Obra Anterior do Mesmo Autor — Comparative Political Sociology Monograph (2021)',
+    filename: 'author_prior_work_political_sociology_2021.pdf',
+    kind: 'AuthorPriorWork',
+    source_lang: 'en-US',
+    target_lang: 'pt-BR',
+    passage_count: 2,
+    avg_alignment_confidence: 1.0,
+    passages: [
+      {
+        id: 'corpus-author-prior-2021-p1',
+        doc_id: 'corpus-author-prior-2021',
+        doc_title:
+          'Obra Anterior do Mesmo Autor — Comparative Political Sociology Monograph (2021)',
+        doc_kind: 'AuthorPriorWork',
+        paragraph_index: 0,
+        prev_paragraph:
+          'Chapter 1 examined post-war European constitutionalism and municipal taxation reforms.',
+        source_paragraph:
+          'Comparative municipal surveys demonstrate that democratic institutions and social cohesion in modern welfare states rely upon institutional trust and historical accountability during fiscal transitions.',
+        target_paragraph:
+          'Pesquisas municipais comparadas demonstram que instituições democráticas e coesão social em Estados de Bem-Estar Social modernos dependem de confiança institucional e responsabilização histórica durante transições fiscais.',
+        next_paragraph:
+          'Where deliberative councils were dismantled, electoral abstention rose by 18.4% within two legislative cycles.',
+        alignment_confidence: 1.0,
+      },
+      {
+        id: 'corpus-author-prior-2021-p2',
+        doc_id: 'corpus-author-prior-2021',
+        doc_title:
+          'Obra Anterior do Mesmo Autor — Comparative Political Sociology Monograph (2021)',
+        doc_kind: 'AuthorPriorWork',
+        paragraph_index: 1,
+        prev_paragraph:
+          'Methodological Note: All archival citations follow the 300 DPI facsimile standard.',
+        source_paragraph:
+          'Whenever historical scans processed in our digital archive are exported, bounding-box coordinates and searchable PDF text layers remain linked to the bilingual apparatus.',
+        target_paragraph:
+          'Sempre que digitalizações históricas processadas em nosso arquivo digital são exportadas, coordenadas de bounding-box e camadas de texto em PDF pesquisável permanecem vinculadas ao aparato bilíngue.',
+        next_paragraph:
+          'See Table 4 for memory footprint comparisons across local quantized models.',
+        alignment_confidence: 1.0,
+      },
+    ],
+  },
+  {
+    id: 'corpus-mono-estilo-ptbr',
+    title:
+      'Referência Monolíngue no Idioma de Chegada — Cadernos de Tradução & Sociologia Histórica (USP/UNICAMP)',
+    filename: 'cadernos_traducao_sociologia_ptbr.md',
+    kind: 'MonolingualTargetReference',
+    source_lang: 'pt-BR',
+    target_lang: 'pt-BR',
+    passage_count: 2,
+    avg_alignment_confidence: 1.0,
+    passages: [
+      {
+        id: 'corpus-mono-estilo-ptbr-p1',
+        doc_id: 'corpus-mono-estilo-ptbr',
+        doc_title:
+          'Referência Monolíngue PT-BR — Cadernos de Tradução & Sociologia Histórica (USP/UNICAMP)',
+        doc_kind: 'MonolingualTargetReference',
+        paragraph_index: 0,
+        prev_paragraph:
+          'Na tradição historiográfica brasileira sobre os movimentos operários do século XX, distingue-se rigorosamente a categoria fabril do salariado urbano geral.',
+        source_paragraph:
+          'Quando operários e estudantes desafiaram o poder em maio de 1968, a ocupação da fábrica Citroën consagrou o uso do termo "operários" (e não meramente "trabalhadores") nas edições críticas em língua portuguesa.',
+        target_paragraph:
+          'Colocação recomendada em PT-BR: "operários e estudantes desafiaram o poder", "greve geral", "comitês de fábrica".',
+        next_paragraph:
+          'Nas notas de rodapé e fichas catalográficas, preservam-se intactos os números de ISBN, dimensões e depósitos legais da edição portenha ou parisiense.',
+        alignment_confidence: 1.0,
+      },
+      {
+        id: 'corpus-mono-estilo-ptbr-p2',
+        doc_id: 'corpus-mono-estilo-ptbr',
+        doc_title:
+          'Referência Monolíngue PT-BR — Cadernos de Tradução & Sociologia Histórica (USP/UNICAMP)',
+        doc_kind: 'MonolingualTargetReference',
+        paragraph_index: 1,
+        prev_paragraph:
+          'Sobre o vocabulário técnico de inteligência artificial aplicada à filologia e tradução editorial:',
+        source_paragraph:
+          'Modelos de linguagem locais compactos evitam o desvio terminológico e alucinação quando operam sob ancoragem contextual e uma Memória de Tradução auxiliar.',
+        target_paragraph:
+          'Colocação recomendada em PT-BR: "modelos de linguagem locais compactos", "desvio terminológico e alucinação", "ancoragem contextual".',
+        next_paragraph:
+          'Recomenda-se manter a palavra técnica "harness" em minúsculas sem tradução literal.',
+        alignment_confidence: 1.0,
+      },
+    ],
+  },
+];
+
+function normalizePhraseForLsc(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9à-ÿ\s-]/gi, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .join(' ');
+}
+
+function computeGlobalWordSimilarityPct(a: string, b: string): number {
+  const wordsA = new Set(normalizePhraseForLsc(a).split(' ').filter(Boolean));
+  const wordsB = new Set(normalizePhraseForLsc(b).split(' ').filter(Boolean));
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+  let inter = 0;
+  wordsA.forEach((w) => {
+    if (wordsB.has(w)) inter++;
+  });
+  const union = wordsA.size + wordsB.size - inter;
+  return Math.round((inter / Math.max(1, union)) * 100);
+}
+
+function findLongestSubstringConcordances(
+  segmentSource: string,
+  docs: LiveCorpusDocumentSpec[],
+  glossary: GlossaryTerm[]
+): LscSubphraseMatch[] {
+  const tokenRe = /[A-Za-zÀ-ÿ0-9]+(?:-[A-Za-zÀ-ÿ0-9]+)*/g;
+  const tokens: Array<{ word: string; start: number; end: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(segmentSource)) !== null) {
+    tokens.push({
+      word: m[0],
+      start: m.index,
+      end: m.index + m[0].length,
+    });
+  }
+  if (tokens.length < 2) return [];
+
+  const allPassages: LiveCorpusPassage[] = [];
+  for (const d of docs) {
+    for (const p of d.passages) {
+      allPassages.push(p);
+    }
+  }
+
+  const covered = new Array(tokens.length).fill(false);
+  const results: LscSubphraseMatch[] = [];
+  const maxN = Math.min(8, tokens.length);
+
+  for (let n = maxN; n >= 2; n--) {
+    for (let startI = 0; startI <= tokens.length - n; startI++) {
+      const endI = startI + n;
+      let anyCovered = false;
+      for (let k = startI; k < endI; k++) {
+        if (covered[k]) {
+          anyCovered = true;
+          break;
+        }
+      }
+      if (anyCovered) continue;
+
+      const charStart = tokens[startI].start;
+      const charEnd = tokens[endI - 1].end;
+      const exactSlice = segmentSource.slice(charStart, charEnd);
+      const normNgram = normalizePhraseForLsc(exactSlice);
+      if (normNgram.length < 7) continue;
+
+      const hitPassage = allPassages.find((p) =>
+        normalizePhraseForLsc(p.source_paragraph).includes(normNgram)
+      );
+      const directLexicon = SUBSEGMENT_MUSE_LEXICON[normNgram];
+      const glossHit = glossary.find(
+        (g) => normalizePhraseForLsc(g.source_term) === normNgram
+      );
+
+      if (hitPassage || directLexicon || glossHit) {
+        for (let k = startI; k < endI; k++) {
+          covered[k] = true;
+        }
+        const passage = hitPassage || allPassages[0];
+        const suggested =
+          directLexicon ||
+          (glossHit
+            ? glossHit.do_not_translate
+              ? glossHit.source_term
+              : glossHit.target_term
+            : undefined);
+        const globalSim = passage
+          ? computeGlobalWordSimilarityPct(segmentSource, passage.source_paragraph)
+          : 34;
+
+        results.push({
+          source_ngram: exactSlice,
+          word_count: n,
+          char_start: charStart,
+          char_end: charEnd,
+          suggested_target_phrase: suggested,
+          passage_id: passage?.id || 'lsc-lexicon',
+          doc_title:
+            passage?.doc_title || 'LiveCorpus (.amanuensis/corpus/)',
+          doc_kind: passage?.doc_kind || 'BilingualAutoAligned',
+          prev_paragraph: passage?.prev_paragraph,
+          source_paragraph: passage?.source_paragraph || segmentSource,
+          target_paragraph: passage?.target_paragraph || suggested,
+          next_paragraph: passage?.next_paragraph,
+          global_sentence_similarity_pct: globalSim,
+        });
+      }
+    }
+  }
+
+  return results.sort((a, b) => a.char_start - b.char_start);
+}
+
+function buildLiveCorpusDocumentFromRaw(
+  title: string,
+  filename: string,
+  kind: LiveCorpusDocKind,
+  sourceLang: string,
+  targetLang: string,
+  rawSource: string,
+  rawTarget?: string
+): LiveCorpusDocumentSpec {
+  const docId = `corpus-doc-${Date.now()}`;
+  const srcParas = rawSource
+    .replace(/\r\n/g, '\n')
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const tgtParas = (rawTarget || '')
+    .replace(/\r\n/g, '\n')
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const passages: LiveCorpusPassage[] = srcParas.map((sp, idx) => {
+    const mappedTgt =
+      kind === 'BilingualAutoAligned' && tgtParas.length > 0
+        ? tgtParas[Math.min(tgtParas.length - 1, idx)]
+        : undefined;
+    return {
+      id: `${docId}-p${idx + 1}`,
+      doc_id: docId,
+      doc_title: title,
+      doc_kind: kind,
+      paragraph_index: idx,
+      prev_paragraph:
+        idx > 0
+          ? srcParas[idx - 1]
+          : '¶ [Início do documento indexado no Cofre LiveCorpus (.amanuensis/corpus/)]',
+      source_paragraph: sp,
+      target_paragraph: mappedTgt,
+      next_paragraph:
+        idx + 1 < srcParas.length
+          ? srcParas[idx + 1]
+          : '¶ [Fim do documento indexado no Cofre LiveCorpus (.amanuensis/corpus/)]',
+      alignment_confidence: kind === 'BilingualAutoAligned' ? 0.94 : 1.0,
+    };
+  });
+
+  return {
+    id: docId,
+    title,
+    filename,
+    kind,
+    source_lang: sourceLang,
+    target_lang: targetLang,
+    passage_count: passages.length,
+    avg_alignment_confidence: kind === 'BilingualAutoAligned' ? 0.94 : 1.0,
+    passages,
   };
 }
 
@@ -2647,6 +3031,25 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
   // Open Benchmark Tooltip ID
   const [openTooltipModelId, setOpenTooltipModelId] = useState<string | null>(null);
 
+  // Issue #2: LiveCorpus (.amanuensis/corpus/) & Longest Substring Concordance (LSC + Muse) State
+  const [liveCorpusDocs, setLiveCorpusDocs] =
+    useState<LiveCorpusDocumentSpec[]>(INITIAL_LIVECORPUS_DOCS);
+  const [inspectedContextPassage, setInspectedContextPassage] =
+    useState<LiveCorpusPassage | null>(INITIAL_LIVECORPUS_DOCS[0].passages[1]);
+  const [showLiveCorpusDrawerInWorkbench, setShowLiveCorpusDrawerInWorkbench] =
+    useState<boolean>(false);
+  const [newCorpusDocTitle, setNewCorpusDocTitle] = useState<string>(
+    'Obra Anterior / Par Bilíngue de Referência'
+  );
+  const [newCorpusDocKind, setNewCorpusDocKind] =
+    useState<LiveCorpusDocKind>('BilingualAutoAligned');
+  const [newCorpusRawSource, setNewCorpusRawSource] = useState<string>(
+    'En mayo de 1968, los comités de fábrica en Renault y Citroën articularon demandas salariales con la autogestión.\n\nCuando obreros y estudiantes desafiaron al poder, surgieron nuevas formas de prensa militante y deliberación.'
+  );
+  const [newCorpusRawTarget, setNewCorpusRawTarget] = useState<string>(
+    'Em maio de 1968, os comitês de fábrica na Renault e na Citroën articularam demandas salariais com a autogestão.\n\nQuando operários e estudantes desafiaram o poder, surgiram novas formas de imprensa militante e deliberação.'
+  );
+
   // First-Run Onboarding Wizard State
   const [showOnboarding, setShowOnboarding] = useState<boolean>(true);
   const [onboardingStep, setOnboardingStep] = useState<number>(1);
@@ -3186,6 +3589,101 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
     const low = activeSegment.source_text.toLowerCase();
     return glossary.filter((g) => low.includes(g.source_term.toLowerCase()));
   }, [activeSegment, glossary]);
+
+  // Issue #2: Longest Substring Concordance (LSC) + Muse Sub-segment Predictions for the Active Segment
+  const activeLscMatches = useMemo(() => {
+    return findLongestSubstringConcordances(
+      activeSegment.source_text,
+      liveCorpusDocs,
+      glossary
+    );
+  }, [activeSegment.source_text, liveCorpusDocs, glossary]);
+
+  const handleInsertLscSubphrase = useCallback(
+    (segIdx: number, match: LscSubphraseMatch) => {
+      const seg = segments[segIdx];
+      if (!seg) return;
+      const phraseToInsert =
+        match.suggested_target_phrase || match.target_paragraph || match.source_ngram;
+      const cur = seg.target_text.trim();
+      const nextTarget = cur
+        ? cur.toLowerCase().includes(phraseToInsert.toLowerCase())
+          ? cur
+          : `${cur} ${phraseToInsert}`
+        : phraseToInsert;
+
+      setSegments((prev) =>
+        prev.map((s, i) =>
+          i === segIdx
+            ? {
+                ...s,
+                target_text: nextTarget,
+                status: s.status === 'Untranslated' ? 'Translated' : s.status,
+              }
+            : s
+        )
+      );
+      setStatusNotice(
+        `⚡ [LSC / Muse] Sub-frase "${match.source_ngram} → ${phraseToInsert}" inserida no Trecho #${
+          segIdx + 1
+        }!`
+      );
+    },
+    [segments]
+  );
+
+  const handleAddDocumentToLiveCorpus = useCallback(() => {
+    if (!newCorpusDocTitle.trim() || !newCorpusRawSource.trim()) return;
+    const created = buildLiveCorpusDocumentFromRaw(
+      newCorpusDocTitle.trim(),
+      `${newCorpusDocTitle
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .slice(0, 32)}.md`,
+      newCorpusDocKind,
+      onbSourceLang,
+      onbTargetLang,
+      newCorpusRawSource,
+      newCorpusDocKind === 'BilingualAutoAligned' ? newCorpusRawTarget : undefined
+    );
+    setLiveCorpusDocs((prev) => [created, ...prev]);
+    if (created.passages.length > 0) {
+      setInspectedContextPassage(created.passages[0]);
+    }
+    setStatusNotice(
+      `📚 Obra "${created.title}" (${created.passage_count} parágrafos) indexada instantaneamente em .amanuensis/corpus/ sem precisar de alinhador TMX manual!`
+    );
+  }, [
+    newCorpusDocKind,
+    newCorpusDocTitle,
+    newCorpusRawSource,
+    newCorpusRawTarget,
+    onbSourceLang,
+    onbTargetLang,
+  ]);
+
+  const triggerPickLiveCorpusFile = useCallback((role: LiveCorpusDocKind) => {
+    const wk = (
+      window as unknown as {
+        webkit?: {
+          messageHandlers?: {
+            amanuensisNative?: { postMessage: (msg: unknown) => void };
+          };
+        };
+      }
+    ).webkit;
+    if (wk?.messageHandlers?.amanuensisNative) {
+      wk.messageHandlers.amanuensisNative.postMessage({
+        action: 'pickLiveCorpusFile',
+        role,
+      });
+    } else {
+      setStatusNotice(
+        '📂 Selecione ou cole o texto da obra de referência no formulário .amanuensis/corpus/ abaixo!'
+      );
+    }
+  }, []);
 
   const activeQaWarnings = useMemo(() => {
     const tgt = activeSegment.target_text.trim();
@@ -5070,6 +5568,33 @@ ${adr.adopted_decision}
           `🔮 Vault Obsidian gravado em "${res.vaultPath}" (${res.writtenFiles} arquivos • Commit Git #${res.commitShortHash})!`
         );
       }
+    };
+    (
+      win as unknown as {
+        amanuensisReceiveLiveCorpusFile?: (payload: {
+          filename: string;
+          path: string;
+          role: LiveCorpusDocKind;
+          content: string;
+        }) => void;
+      }
+    ).amanuensisReceiveLiveCorpusFile = (payload) => {
+      if (!payload || !payload.content) return;
+      const doc = buildLiveCorpusDocumentFromRaw(
+        payload.filename.replace(/\.[^.]+$/, ''),
+        payload.filename,
+        payload.role || 'AuthorPriorWork',
+        onbSourceLang,
+        onbTargetLang,
+        payload.content
+      );
+      setLiveCorpusDocs((prev) => [doc, ...prev]);
+      if (doc.passages.length > 0) {
+        setInspectedContextPassage(doc.passages[0]);
+      }
+      setStatusNotice(
+        `📚 Arquivo "${payload.filename}" (${doc.passage_count} parágrafos) importado para .amanuensis/corpus/ com janela de Contexto Expandido (3¶)!`
+      );
     };
     win.amanuensisReceiveScanSnippet = (snippet) => {
       if (snippet && snippet.cropDataUrl) {
@@ -7982,7 +8507,65 @@ ${adr.adopted_decision}
                       <span className={`status-dot status-${seg.status}`} title={seg.status} />
                     </div>
 
-                    <div className="segment-source">{seg.source_text}</div>
+                    <div className="segment-source">
+                      {isActive && activeLscMatches.length > 0 ? (
+                        (() => {
+                          const nodes: React.ReactNode[] = [];
+                          let cursor = 0;
+                          activeLscMatches.forEach((hit, hIdx) => {
+                            if (hit.char_start > cursor) {
+                              nodes.push(
+                                <span key={`txt-${hIdx}`}>
+                                  {seg.source_text.slice(cursor, hit.char_start)}
+                                </span>
+                              );
+                            }
+                            nodes.push(
+                              <span
+                                key={`lsc-${hIdx}`}
+                                title={`🔍 LSC (${hit.word_count} palavras • Sim. global da frase: ${
+                                  hit.global_sentence_similarity_pct
+                                }%): "${hit.source_ngram}" → "${
+                                  hit.suggested_target_phrase || hit.target_paragraph || ''
+                                }". Clique para inspecionar Contexto 3¶ e inserir sub-frase!`}
+                                style={{
+                                  borderBottom: '2px dashed var(--accent)',
+                                  background: 'rgba(0, 84, 227, 0.10)',
+                                  padding: '0 2px',
+                                  cursor: 'pointer',
+                                  fontWeight: 600,
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setInspectedContextPassage({
+                                    id: hit.passage_id,
+                                    doc_id: hit.passage_id,
+                                    doc_title: hit.doc_title,
+                                    doc_kind: hit.doc_kind,
+                                    paragraph_index: 1,
+                                    prev_paragraph: hit.prev_paragraph,
+                                    source_paragraph: hit.source_paragraph,
+                                    target_paragraph: hit.target_paragraph,
+                                    next_paragraph: hit.next_paragraph,
+                                    alignment_confidence: 0.96,
+                                  });
+                                  handleInsertLscSubphrase(idx, hit);
+                                }}
+                              >
+                                {seg.source_text.slice(hit.char_start, hit.char_end)}
+                              </span>
+                            );
+                            cursor = hit.char_end;
+                          });
+                          if (cursor < seg.source_text.length) {
+                            nodes.push(<span key="txt-end">{seg.source_text.slice(cursor)}</span>);
+                          }
+                          return nodes;
+                        })()
+                      ) : (
+                        seg.source_text
+                      )}
+                    </div>
 
                     <div className="segment-editor-area">
                       <textarea
@@ -8521,21 +9104,312 @@ ${adr.adopted_decision}
             </div>
           </section>
 
-          {/* Right Pane: Auxiliary TM Hybrid Matches & Active Project Harness */}
+          {/* Right Pane: LiveCorpus (.amanuensis/corpus/), Longest Substring Concordance (LSC), Expanded 3¶ Context & Auxiliary TM */}
           <section className="pane">
             <div className="pane-header" style={{ flexWrap: 'wrap', gap: '4px' }}>
-              <span>🗄️ Bancos Auxiliares & Memória</span>
-              <button
-                type="button"
-                className="btn"
-                style={{ fontSize: '0.7rem', padding: '2px 7px' }}
-                onClick={() => setActiveTab('tm')}
-                title="Abrir o Explorer de Mirrors de Bancos Abertos (OPUS, SciELO, CLACSO, IATE, FreeDict)"
-              >
-                🌐 Mirrors Abertos ({openMirrors.filter((m) => m.installed).length})
-              </button>
+              <span>📚 LiveCorpus, LSC & Memória</span>
+              <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className={`btn ${showLiveCorpusDrawerInWorkbench ? 'btn-primary' : ''}`}
+                  style={{ fontSize: '0.68rem', padding: '2px 6px' }}
+                  onClick={() => setShowLiveCorpusDrawerInWorkbench((prev) => !prev)}
+                  title="Abrir a gaveta única .amanuensis/corpus/ para adicionar Obras Anteriores do Autor, Pares Original + Tradução Antiga ou Referências Monolíngues"
+                >
+                  🗂️ .amanuensis/corpus/ ({liveCorpusDocs.length})
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ fontSize: '0.68rem', padding: '2px 6px' }}
+                  onClick={() => setActiveTab('tm')}
+                  title="Abrir o Explorer de Mirrors de Bancos Abertos e o Cofre Completo LiveCorpus"
+                >
+                  🌐 Mirrors ({openMirrors.filter((m) => m.installed).length})
+                </button>
+              </div>
             </div>
             <div className="pane-body">
+              {/* Clean Single-Drawer LiveCorpus Manager (.amanuensis/corpus/ — Zero Resource Console) */}
+              {showLiveCorpusDrawerInWorkbench && (
+                <div
+                  className="card"
+                  style={{
+                    border: '2px solid var(--accent)',
+                    background: 'var(--page-canvas)',
+                    marginBottom: '12px',
+                  }}
+                >
+                  <div className="card-title" style={{ flexWrap: 'wrap', gap: '4px' }}>
+                    <span>🗂️ Gaveta Limpa `.amanuensis/corpus/` (Zero Alinhador TMX)</span>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ fontSize: '0.68rem', padding: '1px 5px' }}
+                      onClick={() => setShowLiveCorpusDrawerInWorkbench(false)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <p style={{ fontSize: '0.73rem', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                    Solte ou escolha obras anteriores do autor, pares <code>Original + Tradução</code>{' '}
+                    ou referências monolíngues — indexação imediata por parágrafo:
+                  </p>
+                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      style={{ fontSize: '0.7rem', padding: '3px 7px' }}
+                      onClick={() => triggerPickLiveCorpusFile('AuthorPriorWork')}
+                    >
+                      📂 + Obra do Autor (.pdf/.docx/.md)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-success"
+                      style={{ fontSize: '0.7rem', padding: '3px 7px' }}
+                      onClick={() => triggerPickLiveCorpusFile('MonolingualTargetReference')}
+                    >
+                      🇧🇷 + Ref. Monolíngue ({onbTargetLang})
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ fontSize: '0.7rem', padding: '3px 7px' }}
+                      onClick={() => setActiveTab('tm')}
+                    >
+                      🔗 Alinhar Par Original + Tradução…
+                    </button>
+                  </div>
+                  {liveCorpusDocs.map((doc) => (
+                    <div
+                      key={doc.id}
+                      style={{
+                        fontSize: '0.73rem',
+                        padding: '5px 6px',
+                        background: 'var(--bg-primary)',
+                        border: '1px solid var(--border)',
+                        marginBottom: '4px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '4px',
+                      }}
+                    >
+                      <span style={{ wordBreak: 'break-word' }}>
+                        <strong>{doc.filename}</strong> ({doc.passage_count}¶)
+                      </span>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: '0.66rem', padding: '1px 5px' }}
+                        onClick={() => {
+                          if (doc.passages[0]) {
+                            setInspectedContextPassage(doc.passages[0]);
+                          }
+                        }}
+                      >
+                        📖 Ver 3¶
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* 1. LONGEST SUBSTRING CONCORDANCE (LSC) & MUSE SUB-SEGMENT PREDICTION */}
+              <div style={{ marginBottom: '12px' }}>
+                <div
+                  style={{
+                    fontSize: '0.74rem',
+                    fontWeight: 700,
+                    color: 'var(--text-muted)',
+                    marginBottom: '6px',
+                    textTransform: 'uppercase',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <span>✨ Concordância Sub-frase LSC & Muse ({activeLscMatches.length})</span>
+                  <span className="badge badge-accent">N-Gramas Contíguos</span>
+                </div>
+                {activeLscMatches.length === 0 ? (
+                  <div
+                    className="card"
+                    style={{ fontSize: '0.75rem', color: 'var(--text-muted)', padding: '8px' }}
+                  >
+                    Nenhuma sub-frase contígua detectada neste trecho. Adicione mais obras em{' '}
+                    <code>.amanuensis/corpus/</code>.
+                  </div>
+                ) : (
+                  activeLscMatches.map((hit, hIdx) => (
+                    <div
+                      key={hIdx}
+                      className="card"
+                      style={{
+                        padding: '8px',
+                        marginBottom: '6px',
+                        borderLeft: '3px solid var(--accent)',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          marginBottom: '4px',
+                          flexWrap: 'wrap',
+                          gap: '4px',
+                        }}
+                      >
+                        <span className="badge badge-exact">
+                          🔍 LSC: {hit.word_count} palavras contíguas
+                        </span>
+                        <span
+                          className="badge badge-fuzzy"
+                          title="Mesmo quando a frase inteira tem <50% de similaridade global, o LSC resgata a maior sub-frase contígua!"
+                        >
+                          Sim. Global: {hit.global_sentence_similarity_pct}% (&lt;50% Resgatado!)
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '0.78rem', marginBottom: '3px' }}>
+                        Sub-frase fonte: <strong>"{hit.source_ngram}"</strong>
+                      </div>
+                      {hit.suggested_target_phrase && (
+                        <div
+                          style={{
+                            fontSize: '0.8rem',
+                            color: 'var(--success)',
+                            fontWeight: 700,
+                            marginBottom: '6px',
+                          }}
+                        >
+                          ⚡ Muse (Equivalente): "{hit.suggested_target_phrase}"
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          style={{ fontSize: '0.7rem', padding: '2px 7px' }}
+                          onClick={() => handleInsertLscSubphrase(activeSegIdx, hit)}
+                        >
+                          ⚡ Inserir Sub-frase
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{ fontSize: '0.7rem', padding: '2px 7px' }}
+                          onClick={() =>
+                            setInspectedContextPassage({
+                              id: hit.passage_id,
+                              doc_id: hit.passage_id,
+                              doc_title: hit.doc_title,
+                              doc_kind: hit.doc_kind,
+                              paragraph_index: 1,
+                              prev_paragraph: hit.prev_paragraph,
+                              source_paragraph: hit.source_paragraph,
+                              target_paragraph: hit.target_paragraph,
+                              next_paragraph: hit.next_paragraph,
+                              alignment_confidence: 0.96,
+                            })
+                          }
+                        >
+                          📖 Contexto Expandido (¶ Ant./Atual/Post.)
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {/* 2. EXPANDED 3-PARAGRAPH CONTEXT INSPECTOR (¶ Anterior + ¶ Atual + ¶ Posterior) */}
+              {inspectedContextPassage && (
+                <div
+                  className="card"
+                  style={{
+                    marginBottom: '12px',
+                    border: '2px solid var(--accent)',
+                    background: 'var(--page-canvas)',
+                  }}
+                >
+                  <div className="card-title" style={{ flexWrap: 'wrap', gap: '4px' }}>
+                    <span>📖 Inspeção de Contexto Expandido (Janela de 3 Parágrafos)</span>
+                    <span className="badge badge-exact">
+                      {Math.round(inspectedContextPassage.alignment_confidence * 100)}% Alinhado
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: '0.72rem',
+                      color: 'var(--text-muted)',
+                      marginBottom: '6px',
+                      fontWeight: 600,
+                    }}
+                  >
+                    📚 Obra: {inspectedContextPassage.doc_title}
+                  </div>
+
+                  {inspectedContextPassage.prev_paragraph && (
+                    <div
+                      style={{
+                        fontSize: '0.73rem',
+                        color: 'var(--text-muted)',
+                        padding: '5px 7px',
+                        background: 'var(--bg-primary)',
+                        borderLeft: '2px solid var(--border)',
+                        marginBottom: '5px',
+                      }}
+                    >
+                      <strong>¶ Parágrafo Anterior:</strong> {inspectedContextPassage.prev_paragraph}
+                    </div>
+                  )}
+
+                  <div
+                    style={{
+                      fontSize: '0.77rem',
+                      padding: '6px 8px',
+                      background: 'var(--bg-primary)',
+                      border: '1px solid var(--accent)',
+                      marginBottom: '5px',
+                    }}
+                  >
+                    <div>
+                      <strong>¶ Parágrafo da Correspondência (Original):</strong>{' '}
+                      {inspectedContextPassage.source_paragraph}
+                    </div>
+                    {inspectedContextPassage.target_paragraph && (
+                      <div
+                        style={{
+                          marginTop: '4px',
+                          paddingTop: '4px',
+                          borderTop: '1px dashed var(--border)',
+                          color: 'var(--success)',
+                          fontWeight: 600,
+                        }}
+                      >
+                        <strong>↳ Tradução Alinhada no LiveCorpus:</strong>{' '}
+                        {inspectedContextPassage.target_paragraph}
+                      </div>
+                    )}
+                  </div>
+
+                  {inspectedContextPassage.next_paragraph && (
+                    <div
+                      style={{
+                        fontSize: '0.73rem',
+                        color: 'var(--text-muted)',
+                        padding: '5px 7px',
+                        background: 'var(--bg-primary)',
+                        borderLeft: '2px solid var(--border)',
+                      }}
+                    >
+                      <strong>¶ Parágrafo Posterior:</strong> {inspectedContextPassage.next_paragraph}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div style={{ marginBottom: '14px' }}>
                 <div
                   style={{
@@ -8574,27 +9448,56 @@ ${adr.adopted_decision}
                     <div style={{ fontSize: '0.84rem', fontWeight: 600, marginBottom: '8px' }}>
                       {m.target_text}
                     </div>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      style={{ width: '100%', fontSize: '0.76rem' }}
-                      onClick={() => {
-                        const next = [...segments];
-                        next[activeSegIdx] = {
-                          ...activeSegment,
-                          target_text: m.target_text,
-                          status: 'Translated',
-                        };
-                        setSegments(next);
-                        setStatusNotice(
-                          `↳ Correspondência do banco "${m.bank_name}" inserida no Trecho #${
-                            activeSegIdx + 1
-                          }!`
-                        );
-                      }}
-                    >
-                      ↳ Usar Esta Tradução no Trecho #{activeSegIdx + 1}
-                    </button>
+                    <div style={{ display: 'flex', gap: '5px' }}>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        style={{ flex: 1, fontSize: '0.74rem' }}
+                        onClick={() => {
+                          const next = [...segments];
+                          next[activeSegIdx] = {
+                            ...activeSegment,
+                            target_text: m.target_text,
+                            status: 'Translated',
+                          };
+                          setSegments(next);
+                          setStatusNotice(
+                            `↳ Correspondência do banco "${m.bank_name}" inserida no Trecho #${
+                              activeSegIdx + 1
+                            }!`
+                          );
+                        }}
+                      >
+                        ↳ Usar Tradução
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: '0.72rem' }}
+                        onClick={() => {
+                          const prevSeg = segments[Math.max(0, activeSegIdx - 1)];
+                          const nextSeg = segments[Math.min(segments.length - 1, activeSegIdx + 1)];
+                          setInspectedContextPassage({
+                            id: `tm-ctx-${m.id}`,
+                            doc_id: m.bank_name,
+                            doc_title: m.bank_name,
+                            doc_kind: 'BilingualAutoAligned',
+                            paragraph_index: activeSegIdx,
+                            prev_paragraph:
+                              prevSeg?.source_text ||
+                              '¶ [Parágrafo anterior na Memória de Tradução]',
+                            source_paragraph: m.source_text,
+                            target_paragraph: m.target_text,
+                            next_paragraph:
+                              nextSeg?.source_text ||
+                              '¶ [Parágrafo posterior na Memória de Tradução]',
+                            alignment_confidence: m.similarity_pct / 100,
+                          });
+                        }}
+                      >
+                        📖 Ver 3¶
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -8645,9 +9548,197 @@ ${adr.adopted_decision}
         </main>
       )}
 
-      {/* Tab 2: Auxiliary Translation Memory Manager + Open Mirrors Explorer */}
+      {/* Tab 2: Auxiliary Translation Memory Manager + LiveCorpus (.amanuensis/corpus/) + Open Mirrors Explorer */}
       {activeTab === 'tm' && (
         <main className="pane-body" style={{ maxWidth: '1320px', margin: '0 auto', width: '100%' }}>
+          {/* ============================================================================
+              ISSUE #2: COFRE DE REFERÊNCIA VIVA (.amanuensis/corpus/) & LSC ZERO-CONFIG
+              ============================================================================ */}
+          <div
+            className="card"
+            style={{
+              border: '2px solid var(--accent)',
+              marginBottom: '18px',
+              padding: '16px',
+              background: 'var(--page-canvas)',
+            }}
+          >
+            <div
+              className="card-title"
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: '8px',
+                marginBottom: '8px',
+              }}
+            >
+              <div>
+                <h2 style={{ fontSize: '1.1rem', marginBottom: '2px' }}>
+                  📚 Cofre de Referência Viva (<code>.amanuensis/corpus/</code> — LiveDocs & Longest
+                  Substring Concordance)
+                </h2>
+                <p style={{ fontSize: '0.81rem', color: 'var(--text-muted)', fontWeight: 400 }}>
+                  Solte obras anteriores do mesmo autor (<code>.pdf</code>, <code>.docx</code>,{' '}
+                  <code>.md</code>, <code>.epub</code>, <code>.txt</code>), pares{' '}
+                  <strong>Original + Tradução Antiga</strong> (alinhados automaticamente sem
+                  Alinhador TMX manual!) ou artigos monolíngues de referência. Clique em qualquer
+                  passagem para inspecionar o <strong>Contexto Expandido (3 Parágrafos)</strong>:
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => triggerPickLiveCorpusFile('AuthorPriorWork')}
+                >
+                  📂 Importar Obra do Autor (.pdf/.docx/.md)
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-success"
+                  onClick={() => triggerPickLiveCorpusFile('MonolingualTargetReference')}
+                >
+                  🇧🇷 Importar Referência Monolíngue ({onbTargetLang})
+                </button>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1.25fr 1fr',
+                gap: '12px',
+                marginTop: '10px',
+              }}
+            >
+              {/* Left: Indexed LiveCorpus Works + 3-Paragraph Context Browser */}
+              <div>
+                <div style={{ fontSize: '0.78rem', fontWeight: 700, marginBottom: '6px' }}>
+                  🗂️ Obras Indexadas em <code>.amanuensis/corpus/</code> ({liveCorpusDocs.length}{' '}
+                  documentos • Zero Resource Console):
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {liveCorpusDocs.map((doc) => (
+                    <div
+                      key={doc.id}
+                      style={{
+                        padding: '10px',
+                        background: 'var(--bg-primary)',
+                        border: '1px solid var(--border)',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          flexWrap: 'wrap',
+                          gap: '6px',
+                          marginBottom: '6px',
+                        }}
+                      >
+                        <div>
+                          <strong style={{ fontSize: '0.83rem' }}>{doc.title}</strong>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            Arquivo: <code>{doc.filename}</code> • {doc.passage_count} parágrafos
+                            indexados c/ janela 3¶
+                          </div>
+                        </div>
+                        <span className="badge badge-exact">
+                          {doc.kind === 'BilingualAutoAligned'
+                            ? `🔗 Par Bilíngue Auto-Alinhado (${Math.round(
+                                doc.avg_alignment_confidence * 100
+                              )}%)`
+                            : doc.kind === 'AuthorPriorWork'
+                            ? '📚 Obra Anterior do Autor'
+                            : '🇧🇷 Referência Monolíngue'}
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {doc.passages.map((p, pIdx) => (
+                          <button
+                            key={p.id}
+                            type="button"
+                            className={`btn ${
+                              inspectedContextPassage?.id === p.id ? 'btn-primary' : ''
+                            }`}
+                            style={{ fontSize: '0.71rem', padding: '2px 8px' }}
+                            onClick={() => setInspectedContextPassage(p)}
+                          >
+                            📖 Inspecionar Parágrafo #{pIdx + 1} (Contexto 3¶)
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Right: Zero-Config Bilingual / Monolingual Quick Adder + 3¶ Preview */}
+              <div
+                style={{
+                  padding: '10px',
+                  background: 'var(--bg-primary)',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                <div style={{ fontSize: '0.79rem', fontWeight: 700, marginBottom: '6px' }}>
+                  ⚡ Adicionar Par <code>Original + Tradução Antiga</code> ou Obra s/ Alinhamento
+                  Manual:
+                </div>
+                <div style={{ display: 'flex', gap: '6px', marginBottom: '6px' }}>
+                  <input
+                    className="select-pill"
+                    style={{ flex: 1 }}
+                    placeholder="Título da Obra ou Artigo"
+                    value={newCorpusDocTitle}
+                    onChange={(e) => setNewCorpusDocTitle(e.target.value)}
+                  />
+                  <select
+                    className="select-pill"
+                    value={newCorpusDocKind}
+                    onChange={(e) => setNewCorpusDocKind(e.target.value as LiveCorpusDocKind)}
+                  >
+                    <option value="BilingualAutoAligned">
+                      🔗 Par Original + Tradução Antiga (Auto-Alinhado)
+                    </option>
+                    <option value="AuthorPriorWork">📚 Obra Anterior do Autor</option>
+                    <option value="MonolingualTargetReference">
+                      🇧🇷 Artigo Monolíngue (Estilo)
+                    </option>
+                  </select>
+                </div>
+                <textarea
+                  className="code-editor"
+                  style={{ minHeight: '62px', fontSize: '0.74rem', marginBottom: '6px' }}
+                  placeholder="Cole aqui os parágrafos do texto original (ou da obra monolíngue)..."
+                  value={newCorpusRawSource}
+                  onChange={(e) => setNewCorpusRawSource(e.target.value)}
+                />
+                {newCorpusDocKind === 'BilingualAutoAligned' && (
+                  <textarea
+                    className="code-editor"
+                    style={{ minHeight: '62px', fontSize: '0.74rem', marginBottom: '6px' }}
+                    placeholder="Cole aqui os parágrafos da tradução antiga correspondente (o Amanuensis alinha automaticamente por parágrafo)..."
+                    value={newCorpusRawTarget}
+                    onChange={(e) => setNewCorpusRawTarget(e.target.value)}
+                  />
+                )}
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ width: '100%' }}
+                  onClick={handleAddDocumentToLiveCorpus}
+                >
+                  + Indexar Instantaneamente em .amanuensis/corpus/ (Ativar LSC & Contexto 3¶)
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* ============================================================================
               EXPLORER DE MIRRORS DE BANCOS AUXILIARES ABERTOS (Setup Facilitado & Progresso)
               ============================================================================ */}

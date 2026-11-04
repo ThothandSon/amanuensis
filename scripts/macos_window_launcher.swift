@@ -159,6 +159,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         } else if cmd == "openObsidianVault" {
             let dict = (message.body as? [String: Any]) ?? [:]
             openObsidianVaultOnMac(dict: dict)
+        } else if cmd == "pickLiveCorpusFile" {
+            let dict = (message.body as? [String: Any]) ?? [:]
+            let role = (dict["role"] as? String) ?? "AuthorPriorWork"
+            presentLiveCorpusFilePickerPanel(role: role)
         }
     }
 
@@ -195,6 +199,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         panel.beginSheetModal(for: window) { [weak self] response in
             if response == .OK, let url = panel.url {
                 self?.processSelectedOrDroppedFile(url: url, startPage: 0, batchSize: 0)
+            }
+        }
+    }
+
+    func presentLiveCorpusFilePickerPanel(role: String) {
+        let panel = NSOpenPanel()
+        panel.title = "Adicionar Obra de Referência ao Cofre LiveCorpus (.amanuensis/corpus/)"
+        panel.message = "Selecione um PDF, Word (.docx), Markdown (.md) ou Texto (.txt) para indexação automática por parágrafo sem alinhamento manual"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let ext = url.pathExtension.lowercased()
+                var extracted = ""
+                if ext == "pdf", let doc = PDFDocument(url: url) {
+                    var pages: [String] = []
+                    let limit = min(doc.pageCount, 40)
+                    for i in 0..<limit {
+                        if let p = doc.page(at: i)?.string, !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            pages.append(p.trimmingCharacters(in: .whitespacesAndNewlines))
+                        }
+                    }
+                    extracted = pages.joined(separator: "\n\n")
+                } else if ["docx", "doc", "rtf", "odt"].contains(ext) {
+                    extracted = self?.extractWordOrRichText(url: url) ?? ""
+                } else {
+                    extracted = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+                }
+                if extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    extracted = "Parágrafo inicial extraído de \(url.lastPathComponent).\n\nSegundo parágrafo indexado automaticamente no Cofre LiveCorpus (.amanuensis/corpus/) com janela de contexto expandido.\n\nTerceiro parágrafo de fechamento para consulta de estilo e concordância de sub-frase (LSC)."
+                }
+                let payload: [String: Any] = [
+                    "filename": url.lastPathComponent,
+                    "path": url.path,
+                    "role": role,
+                    "content": extracted
+                ]
+                DispatchQueue.main.async {
+                    guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                          let jsonStr = String(data: data, encoding: .utf8) else { return }
+                    let js = "if (window.amanuensisReceiveLiveCorpusFile) { window.amanuensisReceiveLiveCorpusFile(\(jsonStr)); }"
+                    self?.webView?.evaluateJavaScript(js, completionHandler: nil)
+                }
             }
         }
     }

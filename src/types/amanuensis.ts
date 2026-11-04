@@ -236,3 +236,50 @@ export interface ObsidianVaultNote {
   content: string;
 }
 
+export type LiveCorpusDocKind =
+  | 'BilingualAutoAligned'
+  | 'AuthorPriorWork'
+  | 'MonolingualTargetReference';
+
+export interface LiveCorpusPassage {
+  id: string;
+  doc_id: string;
+  doc_title: string;
+  doc_kind: LiveCorpusDocKind;
+  paragraph_index: number;
+  prev_paragraph?: string;
+  source_paragraph: string;
+  target_paragraph?: string;
+  next_paragraph?: string;
+  alignment_confidence: number;
+}
+
+export interface LiveCorpusDocumentSpec {
+  id: string;
+  title: string;
+  filename: string;
+  kind: LiveCorpusDocKind;
+  source_lang: string;
+  target_lang: string;
+  passage_count: number;
+  avg_alignment_confidence: number;
+  passages: LiveCorpusPassage[];
+}
+
+export interface LscSubphraseMatch {
+  source_ngram: string;
+  word_count: number;
+  char_start: number;
+  char_end: number;
+  suggested_target_phrase?: string;
+  passage_id: string;
+  doc_title: string;
+  doc_kind: LiveCorpusDocKind;
+  prev_paragraph?: string;
+  source_paragraph: string;
+  target_paragraph?: string;
+  next_paragraph?: string;
+  global_sentence_similarity_pct: number;
+}
+
+
