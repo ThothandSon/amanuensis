@@ -102,7 +102,71 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
             if let url = URL(string: "http://127.0.0.1:4173/?v=\( Int(Date().timeIntervalSince1970) )") {
                 self?.webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
             }
+            if let idx = CommandLine.arguments.firstIndex(of: "--capture-docs-screenshots"),
+               idx + 1 < CommandLine.arguments.count {
+                let outDir = CommandLine.arguments[idx + 1]
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                    self?.runAutomatedDocumentationTourAndSnapshots(outputDir: outDir)
+                }
+            }
         }
+    }
+
+    func runAutomatedDocumentationTourAndSnapshots(outputDir: String) {
+        let steps = [
+            "01_onboarding_passo1_fluxo_universal",
+            "02_onboarding_passo2_dominio_e_estilo",
+            "03_onboarding_passo3_hardware_e_benchmark_popup",
+            "04_workbench_mesa_de_traducao_visao_geral",
+            "05_menu_dropdown_modelos_e_pdfs",
+            "06_workbench_dejavu_extrator_lexico_e_autoassemble",
+            "07_workbench_omegat_busca_regex_global_e_excecao",
+            "08_workbench_trados_revisao_bilingue_docx_roundtrip",
+            "09_workbench_wordfast_epub_chain_e_srt_cps",
+            "10_workbench_across_matriz_qa_e_notas_nt",
+            "11_workbench_historia_git_do_trecho_e_harness_inline",
+            "12_modo_zen_foco_criativo",
+            "13_aba2_bancos_auxiliares_mirrors_e_livecorpus_lsc",
+            "14_aba3_conversor_ocr_pdf_escaneado_markdown",
+            "15_aba4_harness_evolutivo_agent_md_glossario_skills",
+            "16_aba5_gerenciador_fiel_modelos_e_scanner_disco",
+            "17_aba6_obsidian_biblioteca_viva_canvas_e_git",
+            "18_aba7_seguranca_performance_e_espaco_em_disco"
+        ]
+
+        try? FileManager.default.createDirectory(
+            atPath: outputDir,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        func captureStep(_ index: Int) {
+            if index >= steps.count {
+                print("✅ [E2E Visual Tour] All \(steps.count) screenshots captured in \(outputDir)")
+                NSApp.terminate(nil)
+                return
+            }
+            let stepId = steps[index]
+            let js = "window.amanuensisSetUiStateForDocTour && window.amanuensisSetUiStateForDocTour('\(stepId)');"
+            self.webView.evaluateJavaScript(js) { _, _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    let snapConfig = WKSnapshotConfiguration()
+                    self.webView.takeSnapshot(with: snapConfig) { image, _ in
+                        if let img = image,
+                           let tiff = img.tiffRepresentation,
+                           let bitmap = NSBitmapImageRep(data: tiff),
+                           let pngData = bitmap.representation(using: .png, properties: [:]) {
+                            let fileURL = URL(fileURLWithPath: outputDir).appendingPathComponent("\(stepId).png")
+                            try? pngData.write(to: fileURL)
+                            print("📸 Captured [\(index + 1)/\(steps.count)]: \(fileURL.path)")
+                        }
+                        captureStep(index + 1)
+                    }
+                }
+            }
+        }
+
+        captureStep(0)
     }
 
     // MARK: - WKScriptMessageHandler (Direct Native File Picker & OCR Progress Control)

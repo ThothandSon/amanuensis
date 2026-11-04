@@ -10,3 +10,11 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Amanuensis Team"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+

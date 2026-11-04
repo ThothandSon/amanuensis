@@ -24,14 +24,16 @@ mkdir -p "$STAGE_APP/Contents/Resources"
 cp src-tauri/icons/icon.icns "$STAGE_APP/Contents/Resources/icon.icns"
 cp -R dist "$STAGE_APP/Contents/Resources/dist"
 
-# Copy compiled Rust core daemon binary
+# Copy compiled Rust core daemon binary and strip local symbols for minimal disk footprint
 cp target/release/amanuensis-desktop "$STAGE_APP/Contents/MacOS/amanuensis-core-daemon"
+strip -x "$STAGE_APP/Contents/MacOS/amanuensis-core-daemon" 2>/dev/null || true
 chmod +x "$STAGE_APP/Contents/MacOS/amanuensis-core-daemon"
 
-# Compile native macOS Cocoa/WKWebView window shell
+# Compile native macOS Cocoa/WKWebView window shell with full optimization + strip
 swiftc -O scripts/macos_window_launcher.swift \
   -framework Cocoa -framework WebKit \
   -o "$STAGE_APP/Contents/MacOS/Amanuensis"
+strip -x "$STAGE_APP/Contents/MacOS/Amanuensis" 2>/dev/null || true
 chmod +x "$STAGE_APP/Contents/MacOS/Amanuensis"
 
 # Write macOS Info.plist
@@ -78,6 +80,10 @@ echo "==> [5/5] Gerando instalador de imagem de disco (.dmg) com atalho para /Ap
 mkdir -p "$STAGE_DMG_DIR"
 cp -R "$STAGE_APP" "$STAGE_DMG_DIR/"
 ln -s /Applications "$STAGE_DMG_DIR/Applications"
+hdiutil create -volname "Amanuensis Installer" \
+  -srcfolder "$STAGE_DMG_DIR" \
+  -ov -format ULFO \
+  "$DMG_PATH" >/dev/null || \
 hdiutil create -volname "Amanuensis Installer" \
   -srcfolder "$STAGE_DMG_DIR" \
   -ov -format UDZO \

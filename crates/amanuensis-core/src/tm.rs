@@ -82,6 +82,9 @@ impl TranslationMemoryEngine {
             "
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA mmap_size = 268435456;
+            PRAGMA cache_size = -64000;
             PRAGMA foreign_keys = ON;
 
             CREATE TABLE IF NOT EXISTS tm_banks (

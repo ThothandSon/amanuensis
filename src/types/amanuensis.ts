@@ -436,6 +436,36 @@ export interface ConsistencyMatrixReport {
   findings: ConsistencyMatrixFinding[];
 }
 
+// Issue #7: Security Hardening, Performance Optimization & Disk Footprint Reduction
+export interface DatabaseCompactionReport {
+  db_path: string;
+  bytes_before: number;
+  bytes_after: number;
+  bytes_reclaimed: number;
+  reduction_pct: number;
+  fts5_optimized: boolean;
+  integrity_check_ok: boolean;
+  journal_mode: string;
+}
+
+export interface DiskSpaceAuditReport {
+  app_bundle_bytes: number;
+  dmg_installer_bytes: number;
+  sqlite_databases_bytes: number;
+  zero_copy_models_count: number;
+  zero_copy_saved_bytes: number;
+  release_lto_strip_enabled: boolean;
+  zero_telemetry_verified: boolean;
+}
+
+export interface PromptInjectionSanitizationResult {
+  safe_wrapped_prompt_block: string;
+  sanitized_source_text: string;
+  injection_attempts_neutralized: string[];
+  had_injection_attempt: boolean;
+}
+
+
 
 
 
