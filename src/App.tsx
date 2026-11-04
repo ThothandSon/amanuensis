@@ -10,6 +10,13 @@ import {
   LocalModelSpec,
   DiscoveredDiskModel,
   OpenMirrorBankSpec,
+  SemanticCommitKind,
+  SemanticGitCommit,
+  SegmentRevisionEntry,
+  ObsidianAdrRecord,
+  CanvasNode,
+  CanvasEdge,
+  ObsidianVaultNote,
 } from './types/amanuensis';
 
 const SAMPLE_SCANNED_PDFS = [
@@ -655,6 +662,205 @@ const INITIAL_DISCOVERED_DISK_MODELS: DiscoveredDiskModel[] = [
     []
   ),
 ];
+
+const INITIAL_OBSIDIAN_ADRS: ObsidianAdrRecord[] = [
+  {
+    adr_id: 'ADR-001-Welfare-State-Estado-Bem-Estar',
+    title: 'Padronização de "Welfare State" e "Obreros" em Ciências Sociais',
+    status: 'Aceito',
+    context_problem:
+      'Em textos de sociologia política e história do século XX (como Mayo Francés 1968), traduções literais oscilam entre "Estado de Bem-Estar", "Estado-Providência" e "trabalhadores/operários".',
+    adopted_decision:
+      'Adotar canonicamente "Estado de Bem-Estar Social" para "Welfare State" e "operários" para "obreros" (reservando "trabalhadores" para "trabajadores"), mantendo coesão conceitual em todo o Vault Obsidian.',
+    affected_concepts: ['Translation Memory', 'Estado_de_Bem_Estar_Social', 'Obreros'],
+    affected_segments: [1, 2],
+  },
+  {
+    adr_id: 'ADR-002-Invariancia-Tabelas-e-Citacoes',
+    title: 'Preservação Estrita de Tabelas Markdown e Notas de Rodapé [^1]',
+    status: 'Aceito',
+    context_problem:
+      'Modelos locais compactos tendem a fundir células de tabelas comparativas ou omitir âncoras de rodapé ao traduzir blocos longos.',
+    adopted_decision:
+      'Ativar a skill `markdown-structure` no Harness e auditar deterministamente o número de pipes `|` e números antes de cada commit semântico no Git.',
+    affected_concepts: ['harness', 'Amanuensis'],
+    affected_segments: [2, 3],
+  },
+];
+
+const INITIAL_SEMANTIC_GIT_COMMITS: SemanticGitCommit[] = [
+  {
+    commit_hash: '8e41b9c02d714a3e91f0a4b2c8d1e7f3a4f92c1b',
+    short_hash: '8e41b9c',
+    kind: 'obsidian',
+    scope: 'vault-sync',
+    summary: 'obsidian(vault-sync): geração da Biblioteca Viva, Atlas Conceitual e 2 JSON Canvas (.canvas)',
+    timestamp_iso: '2026-11-04 02:10:00 -0300',
+    author: 'Amanuensis Translation Story Engine',
+    affected_segments: [1, 2, 3, 4],
+    tag_name: 'v1.0-vault-vivo',
+    stats_note: '9 notas Markdown + 2 arquivos .canvas + .obsidian/graph.json sincronizados',
+  },
+  {
+    commit_hash: '5c29a1f83e104d2b77c9e0a1b3d4f6e2a4f92c1b',
+    short_hash: '5c29a1f',
+    kind: 'harness',
+    scope: 'adr-001',
+    summary: 'harness(adr-001): consolidação do glossário e regra aprendida da pós-edição humana',
+    timestamp_iso: '2026-11-04 01:55:00 -0300',
+    author: 'Tradutor & Revisor (Scriptorium)',
+    affected_segments: [1, 2],
+    stats_note: 'ADR-001 vinculado ao Atlas Conceitual e ao AGENT.md',
+  },
+  {
+    commit_hash: '3a18d7e49b201c5f66a8d2e0f1c3b5a9a4f92c1b',
+    short_hash: '3a18d7e',
+    kind: 'translate',
+    scope: 'cap-01',
+    summary: 'translate(cap-01): rascunho assistido por TranslateGemma 4B + pós-edição dos trechos #1–#3',
+    timestamp_iso: '2026-11-04 01:42:00 -0300',
+    author: 'TranslateGemma 4B Q4_K_M + Tradutor',
+    affected_segments: [1, 2, 3],
+    stats_note: '100% de invariância numérica e terminológica verificada',
+  },
+  {
+    commit_hash: '1f04c8a92d317e6b44f1c9d8e2a0b7c4a4f92c1b',
+    short_hash: '1f04c8a',
+    kind: 'ingest',
+    scope: 'ocr-harness',
+    summary: 'ingest(ocr-harness): extração óptica e segmentação contextual via OCR_FORMAT_HARNESS.md',
+    timestamp_iso: '2026-11-04 01:30:00 -0300',
+    author: 'Amanuensis Scan-to-Structure Harness',
+    affected_segments: [1, 2, 3, 4],
+    tag_name: 'v0.1-ingestao-base',
+    stats_note: 'Zero blocos gigantes • Hifenizações reconstituídas com 100% de fidelidade lexical',
+  },
+];
+
+function validateObsidianNoteGates(
+  markdown: string,
+  requiredNumbers: string[]
+): {
+  yamlValid: boolean;
+  wikilinksValid: boolean;
+  numbersValid: boolean;
+  extractedWikilinks: string[];
+  preservedCustomYaml: Record<string, string>;
+  preservedUserNotes: string[];
+  updatedSegments: Record<string, string>;
+  errors: string[];
+} {
+  const errors: string[] = [];
+  const preservedCustomYaml: Record<string, string> = {};
+  const preservedUserNotes: string[] = [];
+  const updatedSegments: Record<string, string> = {};
+
+  const standardKeys = new Set([
+    'title',
+    'author',
+    'translator',
+    'source_lang',
+    'target_lang',
+    'domain',
+    'model',
+    'progress_pct',
+    'tags',
+  ]);
+
+  let yamlValid = false;
+  if (markdown.startsWith('---\n')) {
+    const endIdx = markdown.indexOf('\n---\n', 4);
+    if (endIdx !== -1) {
+      const yamlBlock = markdown.slice(4, endIdx);
+      const lines = yamlBlock.split('\n');
+      yamlValid = lines.every((l) => {
+        const t = l.trim();
+        return !t || t.startsWith('-') || t.startsWith('#') || t.includes(':');
+      });
+      for (const line of lines) {
+        const colonIdx = line.indexOf(':');
+        if (colonIdx !== -1) {
+          const k = line.slice(0, colonIdx).trim();
+          const v = line
+            .slice(colonIdx + 1)
+            .trim()
+            .replace(/^["']|["']$/g, '');
+          if (k && !k.startsWith('-') && !standardKeys.has(k)) {
+            preservedCustomYaml[k] = v;
+          }
+        }
+      }
+      if (!yamlValid) {
+        errors.push('Linha inválida encontrada no bloco YAML Frontmatter.');
+      }
+    } else {
+      errors.push('YAML Frontmatter não possui delimitador de fechamento "---".');
+    }
+  } else {
+    errors.push('A nota não inicia com bloco YAML Frontmatter "---".');
+  }
+
+  const openMatches = (markdown.match(/\[\[/g) || []).length;
+  const closeMatches = (markdown.match(/\]\]/g) || []).length;
+  let wikilinksValid = openMatches === closeMatches;
+  if (!wikilinksValid) {
+    errors.push(
+      `Wikilinks desbalanceados: ${openMatches} aberturas "[[" vs ${closeMatches} fechamentos "]]".`
+    );
+  }
+
+  const extractedWikilinks: string[] = [];
+  const wikiRe = /\[\[([^\]]*)\]\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = wikiRe.exec(markdown)) !== null) {
+    const inner = m[1].trim();
+    if (!inner) {
+      wikilinksValid = false;
+      errors.push('Wikilink vazio "[[]]" detectado.');
+    } else {
+      extractedWikilinks.push(inner);
+    }
+  }
+
+  let numbersValid = true;
+  for (const num of requiredNumbers) {
+    if (!markdown.includes(num)) {
+      numbersValid = false;
+      errors.push(`Invariância numérica violada: número "${num}" ausente na nota do Obsidian.`);
+    }
+  }
+
+  const notesStart = markdown.indexOf('<!-- OBSIDIAN_USER_NOTES_START -->');
+  const notesEnd = markdown.indexOf('<!-- OBSIDIAN_USER_NOTES_END -->');
+  if (notesStart !== -1 && notesEnd > notesStart) {
+    const noteBody = markdown
+      .slice(notesStart + '<!-- OBSIDIAN_USER_NOTES_START -->'.length, notesEnd)
+      .trim();
+    if (noteBody) {
+      preservedUserNotes.push(noteBody);
+    }
+  }
+
+  const segRe =
+    /<!-- AMANUENSIS_TARGET_START:([^\s-]+(?:-[^\s-]+)*) -->([\s\S]*?)<!-- AMANUENSIS_TARGET_END:\1 -->/g;
+  let segMatch: RegExpExecArray | null;
+  while ((segMatch = segRe.exec(markdown)) !== null) {
+    const segId = segMatch[1].trim();
+    const segText = segMatch[2].trim();
+    updatedSegments[segId] = segText;
+  }
+
+  return {
+    yamlValid,
+    wikilinksValid,
+    numbersValid,
+    extractedWikilinks,
+    preservedCustomYaml,
+    preservedUserNotes,
+    updatedSegments,
+    errors,
+  };
+}
 
 const INITIAL_AGENT_MD = `# AGENT.md — Project Translation Harness: Tratado de Tradução & Humanidades
 
@@ -2316,17 +2522,128 @@ function generateLocalTranslation(
 export function App() {
   // Default theme is now Windows XP Luna Classic Squared!
   const [theme, setTheme] = useState<string>('luna-xp');
-  const [activeTab, setActiveTab] = useState<'workbench' | 'tm' | 'ocr' | 'harness' | 'models'>(
-    'workbench'
-  );
+  const [activeTab, setActiveTab] = useState<
+    'workbench' | 'tm' | 'ocr' | 'harness' | 'models' | 'obsidian'
+  >('workbench');
   const [segments, setSegments] = useState<TranslationSegment[]>(INITIAL_SEGMENTS);
   const [activeSegIdx, setActiveSegIdx] = useState<number>(1);
   const [tmBanks, setTmBanks] = useState<TmBank[]>(INITIAL_BANKS);
   const [agentMd, setAgentMd] = useState<string>(INITIAL_AGENT_MD);
   const [rustBridgeConnected, setRustBridgeConnected] = useState<boolean>(false);
 
-  // Inline Segment Harness Inspector toggle
+  // Inline Segment Harness Inspector toggle & Inline Git Genealogy Drawer toggle
   const [openSegmentHarnessIdx, setOpenSegmentHarnessIdx] = useState<number | null>(null);
+  const [openGenealogyIdx, setOpenGenealogyIdx] = useState<number | null>(null);
+
+  // Obsidian Vault + Git Story Engine State (Issue #1)
+  const [obsidianSubTab, setObsidianSubTab] = useState<
+    'vault_explorer' | 'canvas_graph' | 'git_chronicle' | 'roundtrip_sync'
+  >('vault_explorer');
+  const [selectedCanvasIndex, setSelectedCanvasIndex] = useState<0 | 1>(0);
+  const [selectedVaultNoteIdx, setSelectedVaultNoteIdx] = useState<number>(0);
+  const [gitCommits, setGitCommits] = useState<SemanticGitCommit[]>(INITIAL_SEMANTIC_GIT_COMMITS);
+  const [gitCommitFilter, setGitCommitFilter] = useState<'all' | SemanticCommitKind>('all');
+  const [obsidianAdrs, setObsidianAdrs] = useState<ObsidianAdrRecord[]>(INITIAL_OBSIDIAN_ADRS);
+  const [segmentGenealogies, setSegmentGenealogies] = useState<
+    Record<number, SegmentRevisionEntry[]>
+  >({
+    0: [
+      {
+        version_number: 0,
+        stage: 'OriginalSource',
+        stage_label: 'Versão 0 (Original Extraído)',
+        text: INITIAL_SEGMENTS[0].source_text,
+        commit_short_hash: '1f04c8a',
+        timestamp_label: '01:30',
+        model_or_author: 'Documento Fonte / OCR',
+      },
+      {
+        version_number: 1,
+        stage: 'HumanPostEdit',
+        stage_label: 'Versão 1 (Confirmado pelo Tradutor)',
+        text: INITIAL_SEGMENTS[0].target_text,
+        commit_short_hash: '3a18d7e',
+        timestamp_label: '01:42',
+        model_or_author: 'TranslateGemma 4B + Tradutor',
+        rationale_or_adr: 'Título estrutural preservado em Markdown (#).',
+      },
+    ],
+    1: [
+      {
+        version_number: 0,
+        stage: 'OriginalSource',
+        stage_label: 'Versão 0 (Original Extraído)',
+        text: INITIAL_SEGMENTS[1].source_text,
+        commit_short_hash: '1f04c8a',
+        timestamp_label: '01:30',
+        model_or_author: 'Documento Fonte / OCR',
+      },
+      {
+        version_number: 1,
+        stage: 'LocalAiDraft',
+        stage_label: 'Versão 1 (Sugestão IA Local)',
+        text:
+          INITIAL_SEGMENTS[1].ai_draft_snapshot ||
+          'Modelos de linguagem locais compactos alcançam notável fidelidade de tradução quando restritos por um harness específico do projeto e uma Memória de Tradução auxiliar.',
+        commit_short_hash: '3a18d7e',
+        timestamp_label: '01:40',
+        model_or_author: 'TranslateGemma 4B Q4_K_M',
+      },
+      {
+        version_number: 2,
+        stage: 'HumanPostEdit',
+        stage_label: 'Versão 2 (Pós-Edição Filológica & ADR-001)',
+        text: INITIAL_SEGMENTS[1].target_text,
+        commit_short_hash: '5c29a1f',
+        timestamp_label: '01:55',
+        model_or_author: 'Tradutor & Revisor (Scriptorium)',
+        rationale_or_adr:
+          'ADR-001: Refinamento terminológico ("Memória de Tradução" e "harness" travados pelo glossário).',
+      },
+    ],
+  });
+  const [obsidianVaultDiskPath, setObsidianVaultDiskPath] = useState<string>(
+    '~/Documents/Amanuensis_Obsidian_Vaults/Ensaios_Ciencia_Politica_Historia_Vault'
+  );
+  const [lastObsidianSyncHash, setLastObsidianSyncHash] = useState<string>('8e41b9c');
+  const [newAdrTitle, setNewAdrTitle] = useState<string>('');
+  const [newAdrProblem, setNewAdrProblem] = useState<string>('');
+  const [newAdrDecision, setNewAdrDecision] = useState<string>('');
+  const [newMilestoneTag, setNewMilestoneTag] = useState<string>('v1.1-capitulo-1-fechado');
+  const [newMilestoneSummary, setNewMilestoneSummary] = useState<string>(
+    'Fechamento filológico e revisão por pares do Capítulo 1'
+  );
+  const [roundtripEditorMd, setRoundtripEditorMd] = useState<string>(
+    `---
+title: "📖 Manuscrito Bilíngue — Ensaios de Ciência Política, História & Tradução"
+author: "Arquivo Editorial & Coletivo"
+translator: "Scriptorium Amanuensis"
+source_lang: "en-US"
+target_lang: "pt-BR"
+status_editorial: "Revisão Filológica Final (Adicionado no Obsidian)"
+revisor_chefe: "Dra. Helena Vasconcelos"
+edicao_referencia: "Edição Crítica Bilíngue 2026"
+tags:
+  - amanuensis/manuscrito
+  - traducao/biblioteca-viva
+---
+
+# 📖 Manuscrito Bilíngue Sincronizado
+
+<!-- OBSIDIAN_USER_NOTES_START -->
+> [!tip] Nota Livre da Revisora no Obsidian (Preservada Byte-a-Byte)
+> Conferir se todas as ocorrências de [[Translation Memory]] e [[harness]] seguem a decisão documentada em [[ADR-001-Welfare-State-Estado-Bem-Estar]]. Números de referência: 8.4, 14.2%, 2.1, 0.4%.
+<!-- OBSIDIAN_USER_NOTES_END -->
+
+## Trecho #2 (\`seg-2\`) ^seg-2
+- **Conceitos:** [[Translation Memory]], [[harness]], [[Amanuensis]]
+- **Decisões (ADRs):** [[ADR-001-Welfare-State-Estado-Bem-Estar]]
+
+<!-- AMANUENSIS_TARGET_START:seg-2 -->
+Modelos de linguagem locais compactos alcançam notável fidelidade de tradução quando orientados por um harness específico do projeto e por uma Memória de Tradução auxiliar (Revisado no Obsidian).
+<!-- AMANUENSIS_TARGET_END:seg-2 -->
+`
+  );
   // Open Benchmark Tooltip ID
   const [openTooltipModelId, setOpenTooltipModelId] = useState<string | null>(null);
 
@@ -2927,11 +3244,43 @@ export function App() {
             : s
         )
       );
+      const shortHash = Math.floor(0x1000000 + Math.random() * 0xeffffff).toString(16);
+      setSegmentGenealogies((prev) => {
+        const existing = prev[idx] || [
+          {
+            version_number: 0,
+            stage: 'OriginalSource',
+            stage_label: 'Versão 0 (Original Extraído)',
+            text: seg.source_text,
+            commit_short_hash: '1f04c8a',
+            timestamp_label: 'Base',
+            model_or_author: 'Documento Fonte / OCR',
+          },
+        ];
+        const nextVer = existing.length;
+        return {
+          ...prev,
+          [idx]: [
+            ...existing,
+            {
+              version_number: nextVer,
+              stage: 'LocalAiDraft',
+              stage_label: `Versão ${nextVer} (Sugestão IA Local)`,
+              text: immediateDraft,
+              commit_short_hash: shortHash,
+              timestamp_label: new Date().toLocaleTimeString('pt-BR', {
+                hour: '2-digit',
+                minute: '2-digit',
+              }),
+              model_or_author: activeModel.name.split('(')[0].trim(),
+              rationale_or_adr: `Gerado com ${skills.filter((s) => s.enabled).length} skills ativas do Harness.`,
+            },
+          ],
+        };
+      });
       setActiveSegIdx(idx);
       setStatusNotice(
-        `✅ [Trecho #${idx + 1}] Traduzido por "${activeModel.name}" (${onbSourceLang} → ${onbTargetLang}) usando ${
-          skills.filter((s) => s.enabled).length
-        } skills do Harness!`
+        `✅ [Trecho #${idx + 1}] Traduzido por "${activeModel.name}" (${onbSourceLang} → ${onbTargetLang}) • Versão registrada na Genealogia Git (#${shortHash})!`
       );
     },
     [
@@ -3040,6 +3389,66 @@ export function App() {
       setTmBanks((prev) =>
         prev.map((b) => (b.is_primary ? { ...b, entry_count: b.entry_count + 1 } : b))
       );
+
+      const shortHash = Math.floor(0x1000000 + Math.random() * 0xeffffff).toString(16);
+      const isPostEdited = Boolean(
+        seg.ai_draft_snapshot && seg.ai_draft_snapshot.trim() !== finalTarget
+      );
+      setSegmentGenealogies((prev) => {
+        const existing = prev[idx] || [
+          {
+            version_number: 0,
+            stage: 'OriginalSource',
+            stage_label: 'Versão 0 (Original Extraído)',
+            text: seg.source_text,
+            commit_short_hash: '1f04c8a',
+            timestamp_label: 'Base',
+            model_or_author: 'Documento Fonte / OCR',
+          },
+        ];
+        const nextVer = existing.length;
+        return {
+          ...prev,
+          [idx]: [
+            ...existing,
+            {
+              version_number: nextVer,
+              stage: isPostEdited ? 'HumanPostEdit' : 'LocalAiDraft',
+              stage_label: isPostEdited
+                ? `Versão ${nextVer} (Pós-Edição Filológica Confirmada)`
+                : `Versão ${nextVer} (Tradução Confirmada)`,
+              text: finalTarget,
+              commit_short_hash: shortHash,
+              timestamp_label: new Date().toLocaleTimeString('pt-BR', {
+                hour: '2-digit',
+                minute: '2-digit',
+              }),
+              model_or_author: isPostEdited
+                ? 'Tradutor Humano (Pós-Edição)'
+                : activeModel.name.split('(')[0].trim(),
+              rationale_or_adr: isPostEdited
+                ? `Regra aprendida pelo Harness no Trecho #${idx + 1}.`
+                : 'Aprovado sem divergências em relação ao Harness.',
+            },
+          ],
+        };
+      });
+      setGitCommits((prev) => [
+        {
+          commit_hash: `${shortHash}a92d317e6b44f1c9d8e2a0b7c4a4f92c1b`,
+          short_hash: shortHash,
+          kind: isPostEdited ? 'harness' : 'translate',
+          scope: `seg-${idx + 1}`,
+          summary: isPostEdited
+            ? `harness(seg-${idx + 1}): pós-edição confirmada e nova regra aprendida no AGENT.md`
+            : `translate(seg-${idx + 1}): confirmação do trecho #${idx + 1} no manuscrito bilíngue`,
+          timestamp_iso: new Date().toISOString().replace('T', ' ').slice(0, 19),
+          author: 'Tradutor & Amanuensis Story Engine',
+          affected_segments: [idx + 1],
+          stats_note: `Trecho #${idx + 1} sincronizado na TM Principal e no Vault Obsidian`,
+        },
+        ...prev,
+      ]);
 
       if (idx + 1 < segments.length) {
         setActiveSegIdx(idx + 1);
@@ -3916,6 +4325,567 @@ export function App() {
     onbTargetLang,
   ]);
 
+  // ============================================================================
+  // OBSIDIAN + GIT LIVING LIBRARY & KNOWLEDGE GRAPH ENGINE (Issue #1)
+  // ============================================================================
+  const liveObsidianBundle = useMemo(() => {
+    const totalSegs = Math.max(1, segments.length);
+    const confirmedSegs = segments.filter(
+      (s) => s.status === 'Approved' || s.status === 'Translated'
+    ).length;
+    const progressPct = Math.round((confirmedSegs / totalSegs) * 100);
+    const notes: ObsidianVaultNote[] = [];
+
+    // 1. .obsidian/graph.json
+    const graphJson = JSON.stringify(
+      {
+        'collapse-filter': false,
+        search: '',
+        showTags: true,
+        showAttachments: false,
+        hideUnresolved: false,
+        showOrphans: true,
+        'collapse-color-groups': false,
+        colorGroups: [
+          { query: 'path:01_Manuscrito_Bilingue', color: { a: 1, rgb: 3447003 } },
+          { query: 'path:02_Atlas_Conceitual_e_Glossario', color: { a: 1, rgb: 15844367 } },
+          { query: 'path:03_Diario_de_Decisoes_Tradutorias', color: { a: 1, rgb: 10181046 } },
+          { query: 'tag:#alerta-qa', color: { a: 1, rgb: 15158332 } },
+        ],
+        showArrow: true,
+        nodeSizeMultiplier: 1.15,
+        lineSizeMultiplier: 1.0,
+      },
+      null,
+      2
+    );
+
+    // 2. 00_MOC_e_Painel_da_Obra/🏛️ MOC - <Obra>.md
+    const glossListMd = glossary
+      .map(
+        (g) =>
+          `- [[${g.source_term.replace(/\s+/g, '_')}|${g.source_term} → ${g.target_term}]] — _${
+            g.notes || 'Termo travado no Harness'
+          }_`
+      )
+      .join('\n');
+    const adrListMd = obsidianAdrs
+      .map((a) => `- [[${a.adr_id}|${a.adr_id}: ${a.title}]] (\`${a.status}\`)`)
+      .join('\n');
+
+    notes.push({
+      relative_path: `00_MOC_e_Painel_da_Obra/🏛️ MOC - ${onbProjectName}.md`,
+      category: 'MOC',
+      content: `---
+title: "🏛️ MOC — ${onbProjectName}"
+author: "Documento Original (${uploadedPdfName})"
+translator: "Scriptorium Amanuensis"
+source_lang: "${onbSourceLang}"
+target_lang: "${onbTargetLang}"
+domain: "${effectiveDomain}"
+model: "${activeModel.name}"
+progress_pct: ${progressPct}
+tags:
+  - amanuensis/moc
+  - traducao/biblioteca-viva
+---
+
+# 🏛️ Mapa de Conteúdo (MOC) — ${onbProjectName}
+
+> [!abstract] Biblioteca Viva & História Versionada (Obsidian + Git)
+> Cada tradução é um organismo intelectual vivo. Este Vault conecta o **Manuscrito Bilíngue**, o **Atlas Conceitual**, o **Diário de Decisões (ADRs)** e a **Crônica Git**.
+
+## 🧭 Índices Principais do Vault
+- [[📊 Painel de Evolucao e Metricas]]
+- [[🕰️ Cronica da Traducao (Git Log)]]
+- [[Cap_01_Manuscrito|📖 Manuscrito Bilíngue Sincronizado]]
+- [[Mapa_Conceitual_da_Obra.canvas|🕸️ Canvas Visual: Mapa Conceitual da Obra]]
+- [[Linha_Evolutiva_dos_Trechos_Criticos.canvas|🧬 Canvas Visual: Linha Evolutiva dos Trechos Críticos]]
+
+## 🏛️ Atlas Conceitual (${glossary.length} termos nucleares)
+${glossListMd}
+
+## ⚖️ Diário de Decisões Tradutórias (${obsidianAdrs.length} ADRs)
+${adrListMd}
+`,
+    });
+
+    // 3. 00_MOC_e_Painel_da_Obra/📊 Painel de Evolucao e Metricas.md
+    notes.push({
+      relative_path: '00_MOC_e_Painel_da_Obra/📊 Painel de Evolucao e Metricas.md',
+      category: 'MOC',
+      content: `---
+title: "📊 Painel de Evolução e Métricas"
+project: "${onbProjectName}"
+progress_pct: ${progressPct}
+confirmed_segments: ${confirmedSegs}
+total_segments: ${totalSegs}
+commits_count: ${gitCommits.length}
+tags:
+  - amanuensis/painel
+  - dataview
+---
+
+# 📊 Painel de Evolução e Métricas — ${onbProjectName}
+
+| Indicador | Valor Atual |
+| :--- | :--- |
+| **Progresso Geral** | \`${progressPct}%\` (${confirmedSegs}/${totalSegs} trechos) |
+| **Domínio / Especialidade** | \`${effectiveDomain}\` |
+| **Modelo Local Ativo** | \`${activeModel.name}\` |
+| **Termos no Atlas Conceitual** | \`${glossary.length}\` |
+| **Decisões Editoriais (ADRs)** | \`${obsidianAdrs.length}\` |
+| **Commits Semânticos Git** | \`${gitCommits.length}\` |
+
+## 🔎 Consultas Dinâmicas (Obsidian Dataview)
+
+\`\`\`dataview
+TABLE source_term AS "Original", target_term AS "Tradução Canônica", notes AS "Contexto"
+FROM "02_Atlas_Conceitual_e_Glossario/Conceitos"
+SORT file.name ASC
+\`\`\`
+
+\`\`\`dataview
+TABLE status AS "Status", affected_concepts AS "Conceitos"
+FROM "03_Diario_de_Decisoes_Tradutorias"
+SORT file.name ASC
+\`\`\`
+`,
+    });
+
+    // 4. 00_MOC_e_Painel_da_Obra/🕰️ Cronica da Traducao (Git Log).md
+    const commitRows = gitCommits
+      .map(
+        (c) =>
+          `| \`${c.short_hash}\` | \`${c.kind}\` | ${c.summary} | \`${
+            c.tag_name || '—'
+          }\` | \`${c.timestamp_iso}\` |`
+      )
+      .join('\n');
+    notes.push({
+      relative_path: '00_MOC_e_Painel_da_Obra/🕰️ Cronica da Traducao (Git Log).md',
+      category: 'GitStory',
+      content: `---
+title: "🕰️ Crônica da Tradução (Git Log) — ${onbProjectName}"
+branch: "main"
+commits_count: ${gitCommits.length}
+tags:
+  - amanuensis/git-story
+  - cronica-tradutoria
+---
+
+# 🕰️ Crônica da Tradução (Git Log) — ${onbProjectName}
+
+| Hash | Tipo | Mensagem Semântica | Tag / Marco | Timestamp |
+| :--- | :--- | :--- | :--- | :--- |
+${commitRows}
+`,
+    });
+
+    // 5. 01_Manuscrito_Bilingue/Cap_01_Manuscrito.md
+    let manuscriptBody = `---
+title: "📖 Manuscrito Bilíngue — ${onbProjectName}"
+source_lang: "${onbSourceLang}"
+target_lang: "${onbTargetLang}"
+progress_pct: ${progressPct}
+tags:
+  - amanuensis/manuscrito
+---
+
+# 📖 Manuscrito Bilíngue — ${onbProjectName}
+
+<!-- OBSIDIAN_USER_NOTES_START -->
+> [!note] Notas Livres do Tradutor no Obsidian (Sincronização Byte-Preserving)
+> Adicione comentários ou chaves YAML extras; o Amanuensis preserva este bloco intacto.
+<!-- OBSIDIAN_USER_NOTES_END -->
+
+`;
+
+    segments.forEach((seg, idx) => {
+      const segConcepts = glossary
+        .filter((g) => seg.source_text.toLowerCase().includes(g.source_term.toLowerCase()))
+        .map((g) => `[[${g.source_term.replace(/\s+/g, '_')}]]`);
+      const revs = segmentGenealogies[idx] || [
+        {
+          version_number: 0,
+          stage: 'OriginalSource' as const,
+          stage_label: 'Versão 0 (Original Extraído)',
+          text: seg.source_text,
+          commit_short_hash: '1f04c8a',
+          timestamp_label: 'Base',
+          model_or_author: 'Documento Fonte / OCR',
+        },
+      ];
+      const genLines = revs
+        .map(
+          (r) =>
+            `> - **${r.stage_label}** (\`${r.commit_short_hash}\` • \`${r.model_or_author}\`): "${
+              r.text
+            }"${r.rationale_or_adr ? ` — _${r.rationale_or_adr}_` : ''}`
+        )
+        .join('\n');
+
+      manuscriptBody += `## Trecho #${idx + 1} (\`${seg.id}\`) ^seg-${idx + 1}
+- **Status:** \`${seg.status}\` | **Página Scan:** \`${seg.bbox.page}\` | **Conceitos:** ${
+        segConcepts.length > 0 ? segConcepts.join(', ') : 'Geral'
+      }
+
+> [!quote] Original (${onbSourceLang})
+> ${seg.source_text.replace(/\n/g, '\n> ')}
+
+<!-- AMANUENSIS_TARGET_START:${seg.id} -->
+${seg.target_text || '_[Aguardando tradução]_'}
+<!-- AMANUENSIS_TARGET_END:${seg.id} -->
+
+> [!example]- 🕰️ História Git deste Trecho (\`#${idx + 1}\` • ${revs.length} versões)
+${genLines}
+
+`;
+    });
+
+    notes.push({
+      relative_path: '01_Manuscrito_Bilingue/Cap_01_Manuscrito.md',
+      category: 'Manuscrito',
+      content: manuscriptBody,
+    });
+
+    // 6. 02_Atlas_Conceitual_e_Glossario/Conceitos/<slug>.md
+    glossary.forEach((g) => {
+      const slug = g.source_term.replace(/\s+/g, '_');
+      notes.push({
+        relative_path: `02_Atlas_Conceitual_e_Glossario/Conceitos/${slug}.md`,
+        category: 'Conceito',
+        content: `---
+title: "${g.source_term} → ${g.target_term}"
+source_term: "${g.source_term}"
+target_term: "${g.target_term}"
+notes: "${g.notes || 'Termo canônico travado pelo Harness'}"
+tags:
+  - amanuensis/conceito
+  - glossario
+---
+
+# 🧭 Conceito: ${g.source_term} → **${g.target_term}**
+
+- **Termo Original (${onbSourceLang}):** \`${g.source_term}\`
+- **Tradução Canônica Adotada (${onbTargetLang}):** **${g.target_term}**
+- **Regra do Harness:** ${g.do_not_translate ? 'Manter no idioma original (Não traduzir)' : 'Tradução obrigatória travada'}
+
+## 📚 Fundamentação Filológica & Contextual
+${g.notes || 'Termo nuclear do vocabulário conceitual do autor neste projeto.'}
+
+## 🔗 Passagens Conectadas no Manuscrito
+- [[Cap_01_Manuscrito#^seg-1|Trecho #1]]
+- [[Cap_01_Manuscrito#^seg-2|Trecho #2]]
+`,
+      });
+    });
+
+    // 7. 03_Diario_de_Decisoes_Tradutorias/<ADR>.md
+    obsidianAdrs.forEach((adr) => {
+      notes.push({
+        relative_path: `03_Diario_de_Decisoes_Tradutorias/${adr.adr_id}.md`,
+        category: 'ADR',
+        content: `---
+title: "${adr.adr_id}: ${adr.title}"
+adr_id: "${adr.adr_id}"
+status: "${adr.status}"
+affected_concepts: ${JSON.stringify(adr.affected_concepts)}
+tags:
+  - amanuensis/adr
+  - decisao-editorial
+---
+
+# ⚖️ ${adr.adr_id} — ${adr.title}
+
+- **Status:** \`${adr.status}\`
+- **Conceitos Afetados:** ${adr.affected_concepts.map((c) => `[[${c}]]`).join(', ')}
+- **Trechos Impactados:** ${adr.affected_segments
+          .map((s) => `[[Cap_01_Manuscrito#^seg-${s}|Trecho #${s}]]`)
+          .join(', ')}
+
+## 🧩 Dilema Tradutório / Problema
+${adr.context_problem}
+
+## ✅ Decisão Editorial & Regra do Harness
+${adr.adopted_decision}
+`,
+      });
+    });
+
+    // 8. JSON Canvas 1.0: Mapa_Conceitual_da_Obra.canvas
+    const conceptNodes: CanvasNode[] = [
+      {
+        id: 'node-moc-root',
+        type: 'text',
+        x: 340,
+        y: 120,
+        width: 300,
+        height: 135,
+        color: '4',
+        text: `🏛️ MOC: ${onbProjectName}\nDomínio: ${effectiveDomain}\nProgresso: ${progressPct}% (${confirmedSegs}/${totalSegs})`,
+      },
+    ];
+    const conceptEdges: CanvasEdge[] = [];
+
+    glossary.slice(0, 5).forEach((g, i) => {
+      const nid = `node-concept-${i}`;
+      conceptNodes.push({
+        id: nid,
+        type: 'text',
+        x: 15,
+        y: 20 + i * 115,
+        width: 265,
+        height: 98,
+        color: '3',
+        text: `🧭 Conceito: ${g.source_term} → ${g.target_term}\n${
+          g.notes || 'Travado no Glossário'
+        }`,
+      });
+      conceptEdges.push({
+        id: `edge-moc-c-${i}`,
+        fromNode: 'node-moc-root',
+        fromSide: 'left',
+        toNode: nid,
+        toSide: 'right',
+        label: 'Conceito',
+        color: '3',
+      });
+    });
+
+    obsidianAdrs.forEach((adr, j) => {
+      const nid = `node-adr-${j}`;
+      conceptNodes.push({
+        id: nid,
+        type: 'text',
+        x: 695,
+        y: 55 + j * 155,
+        width: 295,
+        height: 125,
+        color: '6',
+        text: `⚖️ ${adr.adr_id}\n${adr.title}\nStatus: ${adr.status}`,
+      });
+      conceptEdges.push({
+        id: `edge-moc-adr-${j}`,
+        fromNode: 'node-moc-root',
+        fromSide: 'right',
+        toNode: nid,
+        toSide: 'left',
+        label: 'Decisão (ADR)',
+        color: '6',
+      });
+    });
+
+    // 9. JSON Canvas 1.0: Linha_Evolutiva_dos_Trechos_Criticos.canvas
+    const genNodes: CanvasNode[] = [];
+    const genEdges: CanvasEdge[] = [];
+    segments.slice(0, 3).forEach((seg, rIdx) => {
+      const revs = segmentGenealogies[rIdx] || [
+        {
+          version_number: 0,
+          stage: 'OriginalSource' as const,
+          stage_label: 'Versão 0 (Original)',
+          text: seg.source_text,
+          commit_short_hash: '1f04c8a',
+          timestamp_label: 'Base',
+          model_or_author: 'OCR Fonte',
+        },
+        {
+          version_number: 1,
+          stage: 'HumanPostEdit' as const,
+          stage_label: 'Versão 1 (Tradução)',
+          text: seg.target_text || 'Aguardando tradução',
+          commit_short_hash: '3a18d7e',
+          timestamp_label: 'Atual',
+          model_or_author: activeModel.name.split('(')[0].trim(),
+        },
+      ];
+      revs.forEach((rev, cIdx) => {
+        const nid = `gen-r${rIdx}-v${cIdx}`;
+        genNodes.push({
+          id: nid,
+          type: 'text',
+          x: 20 + cIdx * 325,
+          y: 20 + rIdx * 145,
+          width: 285,
+          height: 120,
+          color: cIdx === 0 ? '1' : cIdx === 1 ? '5' : '4',
+          text: `Trecho #${rIdx + 1} • ${rev.stage_label} (#${rev.commit_short_hash})\n${rev.text.slice(
+            0,
+            110
+          )}${rev.text.length > 110 ? '…' : ''}`,
+        });
+        if (cIdx > 0) {
+          genEdges.push({
+            id: `edge-gen-${rIdx}-${cIdx}`,
+            fromNode: `gen-r${rIdx}-v${cIdx - 1}`,
+            fromSide: 'right',
+            toNode: nid,
+            toSide: 'left',
+            label: `v${cIdx}`,
+            color: cIdx === 1 ? '5' : '4',
+          });
+        }
+      });
+    });
+
+    notes.push({
+      relative_path: '04_Grafos_e_Canvas/Mapa_Conceitual_da_Obra.canvas',
+      category: 'Canvas',
+      content: JSON.stringify({ nodes: conceptNodes, edges: conceptEdges }, null, 2),
+    });
+
+    notes.push({
+      relative_path: '04_Grafos_e_Canvas/Linha_Evolutiva_dos_Trechos_Criticos.canvas',
+      category: 'Canvas',
+      content: JSON.stringify({ nodes: genNodes, edges: genEdges }, null, 2),
+    });
+
+    notes.push({
+      relative_path: '.obsidian/graph.json',
+      category: 'Config',
+      content: graphJson,
+    });
+
+    notes.push({
+      relative_path: '.amanuensis/AGENT.md',
+      category: 'Config',
+      content: agentMd,
+    });
+
+    return {
+      notes,
+      conceptCanvas: { nodes: conceptNodes, edges: conceptEdges },
+      genealogyCanvas: { nodes: genNodes, edges: genEdges },
+      progressPct,
+    };
+  }, [
+    activeModel.name,
+    agentMd,
+    effectiveDomain,
+    gitCommits,
+    glossary,
+    obsidianAdrs,
+    onbProjectName,
+    onbSourceLang,
+    onbTargetLang,
+    segmentGenealogies,
+    segments,
+    uploadedPdfName,
+  ]);
+
+  const handleSyncObsidianVaultToDisk = useCallback(
+    (openAfter = false, customMsg?: string, customTag?: string) => {
+      const vaultSlug =
+        onbProjectName
+          .replace(/[^a-zA-Z0-9À-ÿ_-]+/g, '_')
+          .replace(/^_+|_+$/g, '')
+          .slice(0, 48) + '_Vault';
+      const commitMsg =
+        customMsg ||
+        `obsidian(vault-sync): sincronização da Biblioteca Viva "${onbProjectName}" (${liveObsidianBundle.notes.length} arquivos)`;
+      const shortHash = Math.floor(0x1000000 + Math.random() * 0xeffffff).toString(16);
+
+      const wk = (
+        window as unknown as {
+          webkit?: {
+            messageHandlers?: {
+              amanuensisNative?: { postMessage: (msg: unknown) => void };
+            };
+          };
+        }
+      ).webkit;
+
+      if (wk?.messageHandlers?.amanuensisNative) {
+        wk.messageHandlers.amanuensisNative.postMessage({
+          action: 'syncObsidianVault',
+          vaultName: vaultSlug,
+          commitMessage: commitMsg,
+          tagName: customTag || '',
+          openObsidianAfter: openAfter,
+          files: liveObsidianBundle.notes.map((n) => ({
+            relativePath: n.relative_path,
+            content: n.content,
+          })),
+        });
+      }
+
+      setLastObsidianSyncHash(shortHash);
+      setObsidianVaultDiskPath(`~/Documents/Amanuensis_Obsidian_Vaults/${vaultSlug}`);
+      setGitCommits((prev) => [
+        {
+          commit_hash: `${shortHash}c8d1e7f3a4f92c1b90e12d34a5b6c7d8`,
+          short_hash: shortHash,
+          kind: customTag ? 'milestone' : 'obsidian',
+          scope: 'vault-sync',
+          summary: commitMsg,
+          timestamp_iso: new Date().toISOString().replace('T', ' ').slice(0, 19),
+          author: 'Amanuensis Translation Story Engine',
+          affected_segments: segments.map((_, i) => i + 1),
+          tag_name: customTag || undefined,
+          stats_note: `${liveObsidianBundle.notes.length} notas/canvas gravados em ~/Documents/Amanuensis_Obsidian_Vaults/${vaultSlug}`,
+        },
+        ...prev,
+      ]);
+      setStatusNotice(
+        openAfter
+          ? `🔮 Vault "${vaultSlug}" gravado no disco, commit Git #${shortHash} registrado e aberto via obsidian://!`
+          : `✅ Vault Obsidian "${vaultSlug}" sincronizado em ~/Documents/Amanuensis_Obsidian_Vaults/${vaultSlug} (Commit Git #${shortHash})!`
+      );
+    },
+    [liveObsidianBundle.notes, onbProjectName, segments]
+  );
+
+  const handleOpenObsidianUri = useCallback(() => {
+    handleSyncObsidianVaultToDisk(true);
+  }, [handleSyncObsidianVaultToDisk]);
+
+  const handleCreateMilestoneCommit = useCallback(() => {
+    if (!newMilestoneTag.trim() || !newMilestoneSummary.trim()) return;
+    const msg = `milestone(${newMilestoneTag.trim()}): ${newMilestoneSummary.trim()}`;
+    handleSyncObsidianVaultToDisk(false, msg, newMilestoneTag.trim());
+    setNewMilestoneSummary('');
+  }, [handleSyncObsidianVaultToDisk, newMilestoneSummary, newMilestoneTag]);
+
+  const handleAddObsidianAdr = useCallback(() => {
+    if (!newAdrTitle.trim() || !newAdrDecision.trim()) return;
+    const nextNum = obsidianAdrs.length + 1;
+    const adrId = `ADR-00${nextNum}-${newAdrTitle
+      .trim()
+      .replace(/[^a-zA-Z0-9À-ÿ]+/g, '-')
+      .slice(0, 26)}`;
+    const newAdr: ObsidianAdrRecord = {
+      adr_id: adrId,
+      title: newAdrTitle.trim(),
+      status: 'Aceito',
+      context_problem:
+        newAdrProblem.trim() || 'Dilema terminológico/estilístico identificado durante a tradução.',
+      adopted_decision: newAdrDecision.trim(),
+      affected_concepts: glossary.slice(0, 2).map((g) => g.source_term.replace(/\s+/g, '_')),
+      affected_segments: [activeSegIdx + 1],
+    };
+    setObsidianAdrs((prev) => [newAdr, ...prev]);
+    const shortHash = Math.floor(0x1000000 + Math.random() * 0xeffffff).toString(16);
+    setGitCommits((prev) => [
+      {
+        commit_hash: `${shortHash}a1b2c3d4e5f60123456789abcdef0123`,
+        short_hash: shortHash,
+        kind: 'harness',
+        scope: adrId.toLowerCase(),
+        summary: `harness(${adrId.toLowerCase()}): nova decisão editorial registrada no Diário de Decisões do Obsidian`,
+        timestamp_iso: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        author: 'Tradutor & Scriptorium',
+        affected_segments: [activeSegIdx + 1],
+        stats_note: `${adrId}.md criado e conectado ao Mapa Conceitual (.canvas)`,
+      },
+      ...prev,
+    ]);
+    setNewAdrTitle('');
+    setNewAdrProblem('');
+    setNewAdrDecision('');
+    setStatusNotice(`⚖️ Decisão Editorial "${adrId}" criada e conectada ao Grafo do Obsidian!`);
+  }, [activeSegIdx, glossary, newAdrDecision, newAdrProblem, newAdrTitle, obsidianAdrs.length]);
+
   const executeMenuAction = useCallback(
     (action: string) => {
       setOpenMenuId(null);
@@ -3968,13 +4938,36 @@ export function App() {
         handleConfirmAndEvolveHarness(activeSegIdx);
       } else if (action === 'toggle-dehyphenate') {
         setDehyphenateEnabled((prev) => !prev);
+      } else if (action === 'obsidian-sync-now') {
+        setShowOnboarding(false);
+        setActiveTab('obsidian');
+        handleSyncObsidianVaultToDisk(false);
+      } else if (action === 'obsidian-open-uri') {
+        setShowOnboarding(false);
+        setActiveTab('obsidian');
+        handleOpenObsidianUri();
+      } else if (action === 'obsidian-view-concept-canvas') {
+        setShowOnboarding(false);
+        setActiveTab('obsidian');
+        setObsidianSubTab('canvas_graph');
+        setSelectedCanvasIndex(0);
+      } else if (action === 'obsidian-view-genealogy-canvas') {
+        setShowOnboarding(false);
+        setActiveTab('obsidian');
+        setObsidianSubTab('canvas_graph');
+        setSelectedCanvasIndex(1);
+      } else if (action === 'obsidian-create-milestone') {
+        setShowOnboarding(false);
+        setActiveTab('obsidian');
+        setObsidianSubTab('git_chronicle');
       } else if (action.startsWith('tab:')) {
         const t = action.replace('tab:', '') as
           | 'workbench'
           | 'tm'
           | 'ocr'
           | 'harness'
-          | 'models';
+          | 'models'
+          | 'obsidian';
         setActiveTab(t);
         setShowOnboarding(false);
       } else if (action.startsWith('theme:')) {
@@ -3994,8 +4987,10 @@ export function App() {
       handleConfirmAndEvolveHarness,
       handleDownloadSearchablePdf,
       handleExportTranslatedMarkdown,
+      handleOpenObsidianUri,
       handlePurgeAllCachesAndOrphans,
       handleRunLocalModelWithHarness,
+      handleSyncObsidianVaultToDisk,
       processedOcrMarkdown,
       triggerChooseFile,
       triggerPasteClipboard,
@@ -4004,11 +4999,19 @@ export function App() {
     ]
   );
 
-  // Connect macOS Native Menu Bar, Native File Picker & Native Drag-and-Drop (PDFKit + Apple Vision OCR + Word textutil + Pasteboard + Model Scanner)
+  // Connect macOS Native Menu Bar, Native File Picker & Native Drag-and-Drop (PDFKit + Apple Vision OCR + Word textutil + Pasteboard + Model Scanner + Obsidian Vault Sync)
   useEffect(() => {
     const win = window as unknown as {
       amanuensisMenuAction?: (act: string) => void;
       amanuensisSetDragState?: (dragging: boolean) => void;
+      amanuensisReceiveObsidianSyncResult?: (res: {
+        status: string;
+        vaultPath: string;
+        writtenFiles: number;
+        commitShortHash: string;
+        commitMessage: string;
+        tagName?: string;
+      }) => void;
       amanuensisReceiveNativeFile?: (payload: {
         status: string;
         filename: string;
@@ -4056,6 +5059,17 @@ export function App() {
     win.amanuensisMenuAction = executeMenuAction;
     win.amanuensisSetDragState = (dragging: boolean) => {
       setIsDraggingFile(dragging);
+    };
+    win.amanuensisReceiveObsidianSyncResult = (res) => {
+      if (res && res.vaultPath) {
+        setObsidianVaultDiskPath(res.vaultPath);
+        if (res.commitShortHash) {
+          setLastObsidianSyncHash(res.commitShortHash);
+        }
+        setStatusNotice(
+          `🔮 Vault Obsidian gravado em "${res.vaultPath}" (${res.writtenFiles} arquivos • Commit Git #${res.commitShortHash})!`
+        );
+      }
     };
     win.amanuensisReceiveScanSnippet = (snippet) => {
       if (snippet && snippet.cropDataUrl) {
@@ -6579,11 +7593,71 @@ export function App() {
               </div>
             )}
           </div>
+
+          {/* Menu: Obsidian & Git */}
+          <div className="menu-root">
+            <button
+              type="button"
+              className={`menu-trigger ${openMenuId === 'obsidian' ? 'open' : ''}`}
+              onClick={() => setOpenMenuId(openMenuId === 'obsidian' ? null : 'obsidian')}
+            >
+              Obsidian & Git
+            </button>
+            {openMenuId === 'obsidian' && (
+              <div className="menu-dropdown" style={{ minWidth: '350px' }}>
+                <button
+                  type="button"
+                  className="menu-dropdown-item"
+                  onClick={() => executeMenuAction('tab:obsidian')}
+                >
+                  <span>🔮 Abrir Biblioteca Viva Obsidian & História Git...</span>
+                  <span className="menu-shortcut">⌘6</span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-dropdown-item"
+                  onClick={() => executeMenuAction('obsidian-sync-now')}
+                >
+                  <span>⚡ Sincronizar Vault no Disco + Commit Semântico Git...</span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-dropdown-item"
+                  onClick={() => executeMenuAction('obsidian-open-uri')}
+                >
+                  <span>🚀 Abrir Diretamente no Obsidian (obsidian://open)...</span>
+                </button>
+                <div className="menu-divider" />
+                <button
+                  type="button"
+                  className="menu-dropdown-item"
+                  onClick={() => executeMenuAction('obsidian-view-concept-canvas')}
+                >
+                  <span>🕸️ Visualizar Canvas: Mapa Conceitual da Obra (.canvas)</span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-dropdown-item"
+                  onClick={() => executeMenuAction('obsidian-view-genealogy-canvas')}
+                >
+                  <span>🧬 Visualizar Canvas: Linha Evolutiva dos Trechos (.canvas)</span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-dropdown-item"
+                  onClick={() => executeMenuAction('obsidian-create-milestone')}
+                >
+                  <span>🏷️ Criar Marco Editorial (Git Tag & Milestone Commit)...</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
           📄 Documento ativo: <strong>{uploadedPdfName}</strong> • Modelo:{' '}
-          <strong>{activeModel.name.split('(')[0].trim()}</strong>
+          <strong>{activeModel.name.split('(')[0].trim()}</strong> • Git:{' '}
+          <code>#{lastObsidianSyncHash}</code>
         </div>
       </div>
 
@@ -6631,6 +7705,12 @@ export function App() {
             onClick={() => setActiveTab('models')}
           >
             5. Modelos Locais ({models.filter((m) => m.installed).length})
+          </button>
+          <button
+            className={`nav-tab ${activeTab === 'obsidian' ? 'active' : ''}`}
+            onClick={() => setActiveTab('obsidian')}
+          >
+            🔮 6. Obsidian & Git ({gitCommits.length})
           </button>
         </nav>
 
@@ -7010,6 +8090,21 @@ export function App() {
                               : '👁️ Print do Scan (Tirar a Teima)'}
                           </button>
 
+                          {/* Interactive Button 1C: Inline Git Genealogy ("🕰️ História Git deste Trecho") */}
+                          <button
+                            type="button"
+                            className="badge badge-accent badge-btn"
+                            title="Ver a evolução versionada deste trecho no Git (Original → IA Local → Pós-Edição Humana / ADR) e restaurar qualquer versão"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveSegIdx(idx);
+                              setOpenGenealogyIdx(openGenealogyIdx === idx ? null : idx);
+                            }}
+                          >
+                            🕰️ História Git (v
+                            {Math.max(0, (segmentGenealogies[idx]?.length || 1) - 1)})
+                          </button>
+
                           {/* Interactive Button 2: Glossary Term Quick-Insert Buttons */}
                           {glossary
                             .filter((g) =>
@@ -7062,6 +8157,129 @@ export function App() {
                           </button>
                         </div>
                       </div>
+
+                      {/* Inline Segment Git Genealogy Drawer ("🕰️ História Git deste Trecho") */}
+                      {openGenealogyIdx === idx && (
+                        <div
+                          className="card"
+                          style={{
+                            marginTop: '6px',
+                            border: '2px solid var(--accent)',
+                            background: 'var(--page-canvas)',
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div
+                            className="card-title"
+                            style={{ flexWrap: 'wrap', gap: '6px' }}
+                          >
+                            <span>
+                              🕰️ Genealogia Git deste Trecho (#{idx + 1}) — Linha Evolutiva
+                              Obsidian + Git
+                            </span>
+                            <div style={{ display: 'flex', gap: '6px' }}>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: '0.7rem', padding: '1px 7px' }}
+                                onClick={() => {
+                                  setActiveTab('obsidian');
+                                  setObsidianSubTab('canvas_graph');
+                                  setSelectedCanvasIndex(1);
+                                }}
+                              >
+                                🧬 Ver no Canvas Visual (.canvas)
+                              </button>
+                              <button
+                                type="button"
+                                className="btn"
+                                style={{ fontSize: '0.7rem', padding: '1px 7px' }}
+                                onClick={() => setOpenGenealogyIdx(null)}
+                              >
+                                ✕ Fechar
+                              </button>
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            {(
+                              segmentGenealogies[idx] || [
+                                {
+                                  version_number: 0,
+                                  stage: 'OriginalSource' as const,
+                                  stage_label: 'Versão 0 (Original Extraído)',
+                                  text: seg.source_text,
+                                  commit_short_hash: '1f04c8a',
+                                  timestamp_label: 'Base',
+                                  model_or_author: 'Documento Fonte / OCR',
+                                },
+                              ]
+                            ).map((rev, rIdx) => (
+                              <div
+                                key={rIdx}
+                                style={{
+                                  padding: '6px 8px',
+                                  background: 'var(--bg-primary)',
+                                  border: '1px solid var(--border)',
+                                  fontSize: '0.77rem',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    marginBottom: '3px',
+                                    flexWrap: 'wrap',
+                                    gap: '4px',
+                                  }}
+                                >
+                                  <span>
+                                    <strong>{rev.stage_label}</strong> •{' '}
+                                    <code>#{rev.commit_short_hash}</code> •{' '}
+                                    <span style={{ color: 'var(--text-muted)' }}>
+                                      {rev.model_or_author} ({rev.timestamp_label})
+                                    </span>
+                                  </span>
+                                  {rev.version_number > 0 && (
+                                    <button
+                                      type="button"
+                                      className="btn"
+                                      style={{ fontSize: '0.68rem', padding: '1px 6px' }}
+                                      onClick={() => {
+                                        const next = [...segments];
+                                        next[idx] = {
+                                          ...seg,
+                                          target_text: rev.text,
+                                          status: 'Translated',
+                                        };
+                                        setSegments(next);
+                                        setStatusNotice(
+                                          `↩️ Trecho #${idx + 1} restaurado para a ${rev.stage_label} (#${rev.commit_short_hash})!`
+                                        );
+                                      }}
+                                    >
+                                      ↩️ Restaurar esta Versão
+                                    </button>
+                                  )}
+                                </div>
+                                <div style={{ whiteSpace: 'pre-wrap' }}>{rev.text}</div>
+                                {rev.rationale_or_adr && (
+                                  <div
+                                    style={{
+                                      marginTop: '3px',
+                                      fontSize: '0.72rem',
+                                      color: 'var(--accent)',
+                                      fontWeight: 700,
+                                    }}
+                                  >
+                                    ⚖️ Justificativa / ADR: {rev.rationale_or_adr}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Inline Real-Time Scan Crop Inspector ("Tirar a Teima no Scan Original" + Corrigir OCR) */}
                       {isScanInspectOpenHere && (
@@ -8244,6 +9462,700 @@ export function App() {
           </div>
 
           {renderModelManagementSuite()}
+        </main>
+      )}
+
+      {/* Tab 6: Obsidian Living Library, Knowledge Graph (.canvas) & Git Story Engine (Issue #1) */}
+      {activeTab === 'obsidian' && (
+        <main className="pane-body" style={{ maxWidth: '1320px', margin: '0 auto', width: '100%' }}>
+          <div
+            className="card"
+            style={{
+              marginBottom: '12px',
+              border: '2px solid var(--accent)',
+              background: 'var(--page-canvas)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: '10px',
+              }}
+            >
+              <div>
+                <h2 style={{ fontSize: '1.12rem', marginBottom: '3px' }}>
+                  🔮 Biblioteca Viva Obsidian + História Git — "{onbProjectName}"
+                </h2>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  Vault no disco: <code>{obsidianVaultDiskPath}</code> • Branch: <code>main</code> •
+                  HEAD: <code>#{lastObsidianSyncHash}</code> •{' '}
+                  <strong>{liveObsidianBundle.notes.length} arquivos sincronizados</strong>
+                </p>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => handleSyncObsidianVaultToDisk(false)}
+                >
+                  ⚡ Sincronizar Vault no Disco + Commit Git
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-success"
+                  onClick={handleOpenObsidianUri}
+                >
+                  🚀 Abrir Diretamente no Obsidian (obsidian://)
+                </button>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                gap: '6px',
+                marginTop: '10px',
+                borderTop: '1px solid var(--border)',
+                paddingTop: '10px',
+                flexWrap: 'wrap',
+              }}
+            >
+              <button
+                type="button"
+                className={`btn ${obsidianSubTab === 'vault_explorer' ? 'btn-primary' : ''}`}
+                onClick={() => setObsidianSubTab('vault_explorer')}
+              >
+                🏛️ 1. Explorador do Vault ({liveObsidianBundle.notes.length} notas/configs)
+              </button>
+              <button
+                type="button"
+                className={`btn ${obsidianSubTab === 'canvas_graph' ? 'btn-primary' : ''}`}
+                onClick={() => setObsidianSubTab('canvas_graph')}
+              >
+                🕸️ 2. Grafo & JSON Canvas 1.0 (2 .canvas + {obsidianAdrs.length} ADRs)
+              </button>
+              <button
+                type="button"
+                className={`btn ${obsidianSubTab === 'git_chronicle' ? 'btn-primary' : ''}`}
+                onClick={() => setObsidianSubTab('git_chronicle')}
+              >
+                🕰️ 3. Crônica Git Semântica & Marcos ({gitCommits.length} commits)
+              </button>
+              <button
+                type="button"
+                className={`btn ${obsidianSubTab === 'roundtrip_sync' ? 'btn-primary' : ''}`}
+                onClick={() => setObsidianSubTab('roundtrip_sync')}
+              >
+                🔄 4. Sincronização Bidirecional Byte-Preserving & 3 Gates
+              </button>
+            </div>
+          </div>
+
+          {/* SUB-TAB 1: VAULT EXPLORER */}
+          {obsidianSubTab === 'vault_explorer' && (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '360px 1fr',
+                gap: '12px',
+                alignItems: 'start',
+              }}
+            >
+              <div className="card">
+                <div className="card-title">
+                  <span>📂 Topologia do Vault Obsidian</span>
+                  <span className="badge badge-exact">
+                    {liveObsidianBundle.notes.length} arquivos
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  {liveObsidianBundle.notes.map((n, idx) => {
+                    const active = idx === selectedVaultNoteIdx;
+                    return (
+                      <button
+                        key={n.relative_path}
+                        type="button"
+                        className={`btn ${active ? 'btn-primary' : ''}`}
+                        style={{
+                          textAlign: 'left',
+                          justifyContent: 'space-between',
+                          fontSize: '0.75rem',
+                          padding: '5px 8px',
+                        }}
+                        onClick={() => setSelectedVaultNoteIdx(idx)}
+                      >
+                        <span style={{ wordBreak: 'break-all' }}>{n.relative_path}</span>
+                        <span className="badge badge-accent" style={{ marginLeft: '6px' }}>
+                          {n.category}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="card">
+                {(() => {
+                  const selectedNote =
+                    liveObsidianBundle.notes[selectedVaultNoteIdx] || liveObsidianBundle.notes[0];
+                  return (
+                    <>
+                      <div className="card-title" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                        <span>
+                          📄 <code>{selectedNote.relative_path}</code>
+                        </span>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ fontSize: '0.73rem' }}
+                            onClick={() => {
+                              const baseName =
+                                selectedNote.relative_path.split('/').pop() || 'nota_obsidian.md';
+                              downloadTextFile(baseName, selectedNote.content);
+                              setStatusNotice(`⬇ Arquivo "${baseName}" exportado com sucesso!`);
+                            }}
+                          >
+                            ⬇ Baixar Este Arquivo
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            style={{ fontSize: '0.73rem' }}
+                            onClick={() => handleSyncObsidianVaultToDisk(false)}
+                          >
+                            ⚡ Gravar Todo o Vault no Disco
+                          </button>
+                        </div>
+                      </div>
+                      <pre
+                        style={{
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: '0.76rem',
+                          background: 'var(--bg-primary)',
+                          border: '1px solid var(--border)',
+                          padding: '10px',
+                          whiteSpace: 'pre-wrap',
+                          maxHeight: '520px',
+                          overflowY: 'auto',
+                        }}
+                      >
+                        {selectedNote.content}
+                      </pre>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
+          {/* SUB-TAB 2: VISUAL JSON CANVAS 1.0 & ADR BUILDER */}
+          {obsidianSubTab === 'canvas_graph' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div className="card">
+                <div className="card-title" style={{ flexWrap: 'wrap', gap: '8px' }}>
+                  <span>
+                    🕸️ Visualizador Interativo JSON Canvas 1.0 (<code>04_Grafos_e_Canvas/*.canvas</code>)
+                  </span>
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className={`btn ${selectedCanvasIndex === 0 ? 'btn-primary' : ''}`}
+                      onClick={() => setSelectedCanvasIndex(0)}
+                    >
+                      🗺️ Mapa_Conceitual_da_Obra.canvas
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn ${selectedCanvasIndex === 1 ? 'btn-primary' : ''}`}
+                      onClick={() => setSelectedCanvasIndex(1)}
+                    >
+                      🧬 Linha_Evolutiva_dos_Trechos_Criticos.canvas
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-success"
+                      onClick={() => {
+                        const targetCanvas =
+                          selectedCanvasIndex === 0
+                            ? liveObsidianBundle.conceptCanvas
+                            : liveObsidianBundle.genealogyCanvas;
+                        const fileName =
+                          selectedCanvasIndex === 0
+                            ? 'Mapa_Conceitual_da_Obra.canvas'
+                            : 'Linha_Evolutiva_dos_Trechos_Criticos.canvas';
+                        downloadTextFile(
+                          fileName,
+                          JSON.stringify(targetCanvas, null, 2),
+                          'application/json;charset=utf-8'
+                        );
+                        setStatusNotice(`⬇ Arquivo "${fileName}" (JSON Canvas 1.0) baixado!`);
+                      }}
+                    >
+                      ⬇ Baixar .canvas (JSON Canvas 1.0)
+                    </button>
+                  </div>
+                </div>
+
+                {/* Color groups legend from .obsidian/graph.json */}
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: '12px',
+                    flexWrap: 'wrap',
+                    fontSize: '0.75rem',
+                    marginBottom: '8px',
+                    padding: '6px 10px',
+                    background: 'var(--bg-primary)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  <strong>🎨 Grupos de Cor (.obsidian/graph.json):</strong>
+                  <span>🔵 Azul: Manuscrito Bilíngue</span>
+                  <span>🟡 Dourado: Conceitos do Glossário</span>
+                  <span>🟣 Roxo: Decisões Editoriais (ADRs)</span>
+                  <span>🟢 Verde: MOC & Versões Confirmadas no Git</span>
+                </div>
+
+                {/* Interactive Canvas Viewport */}
+                {(() => {
+                  const activeCanvas =
+                    selectedCanvasIndex === 0
+                      ? liveObsidianBundle.conceptCanvas
+                      : liveObsidianBundle.genealogyCanvas;
+                  return (
+                    <div
+                      style={{
+                        position: 'relative',
+                        height: '460px',
+                        background: 'var(--bg-primary)',
+                        border: '2px solid var(--border)',
+                        overflow: 'auto',
+                      }}
+                    >
+                      {activeCanvas.nodes.map((node) => {
+                        const borderMap: Record<string, string> = {
+                          '1': '#d97706',
+                          '3': '#ca8a04',
+                          '4': '#15803d',
+                          '5': '#0284c7',
+                          '6': '#7e22ce',
+                        };
+                        const borderColor = borderMap[node.color || '4'] || 'var(--accent)';
+                        return (
+                          <div
+                            key={node.id}
+                            style={{
+                              position: 'absolute',
+                              left: `${node.x}px`,
+                              top: `${node.y}px`,
+                              width: `${node.width}px`,
+                              minHeight: `${node.height}px`,
+                              padding: '8px 10px',
+                              background: 'var(--page-canvas)',
+                              border: `2px solid ${borderColor}`,
+                              boxShadow: '2px 2px 0 rgba(0,0,0,0.12)',
+                              fontSize: '0.75rem',
+                              whiteSpace: 'pre-wrap',
+                            }}
+                          >
+                            {node.text}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* Add new Editorial Decision Record (ADR) */}
+              <div className="card">
+                <div className="card-title">
+                  <span>
+                    ⚖️ Registrar Nova Decisão Tradutória (<code>03_Diario_de_Decisoes_Tradutorias/ADR-*.md</code>)
+                  </span>
+                  <span className="badge badge-exact">{obsidianAdrs.length} ADRs Ativos</span>
+                </div>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 1fr 1fr auto',
+                    gap: '8px',
+                    alignItems: 'end',
+                  }}
+                >
+                  <div>
+                    <label style={{ fontSize: '0.73rem', fontWeight: 700, display: 'block' }}>
+                      Título da Decisão Editorial:
+                    </label>
+                    <input
+                      className="select-pill"
+                      style={{ width: '100%' }}
+                      placeholder="Ex: Distinção entre Obreros e Trabajadores"
+                      value={newAdrTitle}
+                      onChange={(e) => setNewAdrTitle(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.73rem', fontWeight: 700, display: 'block' }}>
+                      Dilema / Problema Filológico:
+                    </label>
+                    <input
+                      className="select-pill"
+                      style={{ width: '100%' }}
+                      placeholder="Ex: Termo usado nas assembleias fabris de 1968"
+                      value={newAdrProblem}
+                      onChange={(e) => setNewAdrProblem(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.73rem', fontWeight: 700, display: 'block' }}>
+                      Decisão Canônica Adotada:
+                    </label>
+                    <input
+                      className="select-pill"
+                      style={{ width: '100%' }}
+                      placeholder="Ex: Traduzir sempre por 'operários' e vincular ao Glossário"
+                      value={newAdrDecision}
+                      onChange={(e) => setNewAdrDecision(e.target.value)}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={handleAddObsidianAdr}
+                  >
+                    + Criar ADR & Conectar ao Grafo
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SUB-TAB 3: SEMANTIC GIT CHRONICLE & MILESTONE TAGS */}
+          {obsidianSubTab === 'git_chronicle' && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: '12px' }}>
+              <div className="card">
+                <div className="card-title" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                  <span>
+                    🕰️ Crônica Semântica da Tradução (Conventional Translation Commits)
+                  </span>
+                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                    {(['all', 'obsidian', 'harness', 'translate', 'ingest', 'milestone'] as const).map(
+                      (k) => (
+                        <button
+                          key={k}
+                          type="button"
+                          className={`btn ${gitCommitFilter === k ? 'btn-primary' : ''}`}
+                          style={{ fontSize: '0.7rem', padding: '1px 6px' }}
+                          onClick={() => setGitCommitFilter(k)}
+                        >
+                          {k === 'all' ? 'Todos' : k}
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {gitCommits
+                    .filter((c) => gitCommitFilter === 'all' || c.kind === gitCommitFilter)
+                    .map((c, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          padding: '8px 10px',
+                          background: 'var(--bg-primary)',
+                          border: '1px solid var(--border)',
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            marginBottom: '4px',
+                            flexWrap: 'wrap',
+                            gap: '6px',
+                          }}
+                        >
+                          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                            <span className="badge badge-accent">
+                              <code>#{c.short_hash}</code>
+                            </span>
+                            <span className="badge badge-exact">{c.kind}</span>
+                            {c.tag_name && (
+                              <span className="badge badge-fuzzy">🏷️ {c.tag_name}</span>
+                            )}
+                          </div>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            {c.timestamp_iso} • {c.author}
+                          </span>
+                        </div>
+                        <div style={{ fontWeight: 700, fontSize: '0.82rem', marginBottom: '3px' }}>
+                          {c.summary}
+                        </div>
+                        <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                          📊 {c.stats_note} • Trechos afetados:{' '}
+                          {c.affected_segments.map((s) => `#${s}`).join(', ')}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              <div className="card">
+                <div className="card-title">
+                  <span>🏷️ Criar Marco Editorial (Git Tag & Milestone)</span>
+                </div>
+                <p style={{ fontSize: '0.77rem', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                  Crie uma tag anotada no repositório Git do Vault (ex:{' '}
+                  <code>v0.1-rascunho-ia</code>, <code>v0.2-pos-edicao-humana</code>,{' '}
+                  <code>v1.0-imprimatur-editorial</code>):
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <div>
+                    <label style={{ fontSize: '0.74rem', fontWeight: 700, display: 'block' }}>
+                      Nome da Tag Git:
+                    </label>
+                    <input
+                      className="select-pill"
+                      style={{ width: '100%' }}
+                      value={newMilestoneTag}
+                      onChange={(e) => setNewMilestoneTag(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.74rem', fontWeight: 700, display: 'block' }}>
+                      Descrição do Marco Editorial:
+                    </label>
+                    <textarea
+                      className="code-editor"
+                      style={{ minHeight: '70px', fontSize: '0.76rem' }}
+                      value={newMilestoneSummary}
+                      onChange={(e) => setNewMilestoneSummary(e.target.value)}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-success"
+                    onClick={handleCreateMilestoneCommit}
+                  >
+                    🏷️ Gravar Commit Semântico + Tag Git no Vault
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SUB-TAB 4: BYTE-PRESERVING BIDIRECTIONAL SYNC & 3 DETERMINISTIC GATES */}
+          {obsidianSubTab === 'roundtrip_sync' &&
+            (() => {
+              const gateReport = validateObsidianNoteGates(roundtripEditorMd, [
+                '8.4',
+                '14.2%',
+                '2.1',
+                '0.4%',
+              ]);
+              const allGatesPassed =
+                gateReport.yamlValid && gateReport.wikilinksValid && gateReport.numbersValid;
+
+              return (
+                <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '12px' }}>
+                  <div className="card">
+                    <div className="card-title" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                      <span>
+                        📝 Editor de Round-Trip Obsidian ↔ Amanuensis (Byte-Preserving Merge)
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={!allGatesPassed}
+                        onClick={() => {
+                          const updatedCount = Object.keys(gateReport.updatedSegments).length;
+                          if (updatedCount > 0) {
+                            setSegments((prev) =>
+                              prev.map((s) =>
+                                gateReport.updatedSegments[s.id]
+                                  ? {
+                                      ...s,
+                                      target_text: gateReport.updatedSegments[s.id],
+                                      status: 'Approved',
+                                    }
+                                  : s
+                              )
+                            );
+                          }
+                          const shortHash = Math.floor(
+                            0x1000000 + Math.random() * 0xeffffff
+                          ).toString(16);
+                          setSegmentGenealogies((prev) => {
+                            const existing = prev[1] || [];
+                            return {
+                              ...prev,
+                              1: [
+                                ...existing,
+                                {
+                                  version_number: existing.length,
+                                  stage: 'ObsidianRoundTrip',
+                                  stage_label: `Versão ${existing.length} (Sincronizado via Obsidian Round-Trip)`,
+                                  text:
+                                    gateReport.updatedSegments['seg-2'] ||
+                                    segments[1]?.target_text ||
+                                    '',
+                                  commit_short_hash: shortHash,
+                                  timestamp_label: new Date().toLocaleTimeString('pt-BR', {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                  }),
+                                  model_or_author:
+                                    gateReport.preservedCustomYaml['revisor_chefe'] ||
+                                    'Obsidian Editor',
+                                  rationale_or_adr: `YAML customizado preservado (${Object.keys(
+                                    gateReport.preservedCustomYaml
+                                  ).join(', ')}).`,
+                                },
+                              ],
+                            };
+                          });
+                          setStatusNotice(
+                            `🔄 Sincronização Bidirecional Byte-Preserving concluída! ${updatedCount} trecho(s) atualizado(s) no Workbench e ${
+                              Object.keys(gateReport.preservedCustomYaml).length
+                            } propriedade(s) YAML extras do Obsidian preservadas intactas!`
+                          );
+                        }}
+                      >
+                        🔄 Aplicar Edições do Obsidian no Workbench (Preservando YAML & Notas)
+                      </button>
+                    </div>
+                    <p
+                      style={{
+                        fontSize: '0.76rem',
+                        color: 'var(--text-muted)',
+                        marginBottom: '6px',
+                      }}
+                    >
+                      Edite abaixo a nota como se estivesse no Obsidian (adicione chaves YAML como{' '}
+                      <code>status_editorial</code>, notas pessoais ou revise o texto dentro de{' '}
+                      <code>AMANUENSIS_TARGET_START</code>):
+                    </p>
+                    <textarea
+                      className="code-editor"
+                      style={{ minHeight: '380px', fontSize: '0.76rem' }}
+                      value={roundtripEditorMd}
+                      onChange={(e) => setRoundtripEditorMd(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="card">
+                    <div className="card-title">
+                      <span>🛡️ 3 Gates Determinísticos de Validação Obsidian & Relatório</span>
+                      <span className={`badge ${allGatesPassed ? 'badge-exact' : 'badge-fuzzy'}`}>
+                        {allGatesPassed ? '✅ 3/3 Gates Aprovados' : '⚠️ Falha nos Gates'}
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <div
+                        style={{
+                          padding: '8px',
+                          background: 'var(--bg-primary)',
+                          border: '1px solid var(--border)',
+                          fontSize: '0.78rem',
+                        }}
+                      >
+                        <strong>1. Gate de Frontmatter YAML:</strong>{' '}
+                        {gateReport.yamlValid
+                          ? '✅ Válido e bem-formado (---)'
+                          : '❌ Frontmatter YAML corrompido'}
+                        <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                          Chaves YAML customizadas do usuário preservadas byte-a-byte:{' '}
+                          {Object.entries(gateReport.preservedCustomYaml).map(([k, v]) => (
+                            <span
+                              key={k}
+                              className="badge badge-accent"
+                              style={{ marginRight: '4px' }}
+                            >
+                              {k}: "{v}"
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div
+                        style={{
+                          padding: '8px',
+                          background: 'var(--bg-primary)',
+                          border: '1px solid var(--border)',
+                          fontSize: '0.78rem',
+                        }}
+                      >
+                        <strong>2. Gate de Integridade de [[Wikilinks]]:</strong>{' '}
+                        {gateReport.wikilinksValid
+                          ? `✅ Todos os ${gateReport.extractedWikilinks.length} [[Wikilinks]] íntegros`
+                          : '❌ Wikilinks quebrados ou vazios'}
+                        <div style={{ marginTop: '4px', display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                          {gateReport.extractedWikilinks.map((w, idx) => (
+                            <span key={idx} className="badge badge-exact">
+                              [[{w}]]
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div
+                        style={{
+                          padding: '8px',
+                          background: 'var(--bg-primary)',
+                          border: '1px solid var(--border)',
+                          fontSize: '0.78rem',
+                        }}
+                      >
+                        <strong>3. Gate de Invariância Numérica & Citações:</strong>{' '}
+                        {gateReport.numbersValid
+                          ? '✅ Todos os números e métricas da fonte preservados'
+                          : '❌ Divergência numérica detectada'}
+                      </div>
+
+                      <div
+                        style={{
+                          padding: '8px',
+                          background: 'var(--bg-primary)',
+                          border: '1px solid var(--border)',
+                          fontSize: '0.78rem',
+                        }}
+                      >
+                        <strong>📌 Trechos Extraídos p/ Atualizar o Workbench:</strong>
+                        {Object.entries(gateReport.updatedSegments).map(([segId, txt]) => (
+                          <div key={segId} style={{ marginTop: '4px', fontSize: '0.75rem' }}>
+                            <code>{segId}</code>: "{txt}"
+                          </div>
+                        ))}
+                      </div>
+
+                      {gateReport.errors.length > 0 && (
+                        <div
+                          style={{
+                            padding: '8px',
+                            background: '#fee2e2',
+                            border: '1px solid #dc2626',
+                            color: '#991b1b',
+                            fontSize: '0.76rem',
+                          }}
+                        >
+                          {gateReport.errors.map((err, idx) => (
+                            <div key={idx}>⚠️ {err}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
         </main>
       )}
 

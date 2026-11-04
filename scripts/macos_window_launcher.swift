@@ -153,6 +153,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
             scanDiskForLocalModels(customDirectory: customDir.isEmpty ? nil : customDir)
         } else if cmd == "pickDirectoryForModelScan" {
             presentDirectoryPickerForModelScan()
+        } else if cmd == "syncObsidianVault" {
+            let dict = (message.body as? [String: Any]) ?? [:]
+            syncObsidianVaultToDiskAndGit(dict: dict)
+        } else if cmd == "openObsidianVault" {
+            let dict = (message.body as? [String: Any]) ?? [:]
+            openObsidianVaultOnMac(dict: dict)
         }
     }
 
@@ -664,6 +670,110 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         }
     }
 
+    private func syncObsidianVaultToDiskAndGit(dict: [String: Any]) {
+        let vaultNameRaw = (dict["vaultName"] as? String) ?? "Mayo_Frances_1968_Vault"
+        let safeVaultName = vaultNameRaw
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let commitMsg = (dict["commitMessage"] as? String) ?? "obsidian(vault): sincronização da biblioteca viva e grafo de conhecimento"
+        let tagName = (dict["tagName"] as? String) ?? ""
+        let openAfter = (dict["openObsidianAfter"] as? Bool) ?? false
+        let files = (dict["files"] as? [[String: Any]]) ?? []
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let baseDir = home.appendingPathComponent("Documents/Amanuensis_Obsidian_Vaults", isDirectory: true)
+            let vaultDir = baseDir.appendingPathComponent(safeVaultName.isEmpty ? "Amanuensis_Vault" : safeVaultName, isDirectory: true)
+            let fm = FileManager.default
+
+            try? fm.createDirectory(at: vaultDir, withIntermediateDirectories: true)
+
+            var writtenCount = 0
+            for f in files {
+                guard let relPath = f["relativePath"] as? String,
+                      let content = f["content"] as? String else { continue }
+                let targetURL = vaultDir.appendingPathComponent(relPath)
+                let parentURL = targetURL.deletingLastPathComponent()
+                try? fm.createDirectory(at: parentURL, withIntermediateDirectories: true)
+                if (try? content.write(to: targetURL, atomically: true, encoding: .utf8)) != nil {
+                    writtenCount += 1
+                }
+            }
+
+            // Initialize Git and create semantic commit inside the Obsidian Vault
+            let gitDir = vaultDir.appendingPathComponent(".git")
+            if !fm.fileExists(atPath: gitDir.path) {
+                self?.runGitCommand(["init"], in: vaultDir)
+                self?.runGitCommand(["config", "user.name", "Amanuensis Translation Story"], in: vaultDir)
+                self?.runGitCommand(["config", "user.email", "scriptorium@amanuensis.local"], in: vaultDir)
+            }
+            self?.runGitCommand(["add", "-A"], in: vaultDir)
+            self?.runGitCommand(["commit", "-m", commitMsg, "--allow-empty"], in: vaultDir)
+            if !tagName.isEmpty {
+                self?.runGitCommand(["tag", "-f", tagName], in: vaultDir)
+            }
+            let headHash = self?.runGitCommand(["rev-parse", "--short", "HEAD"], in: vaultDir).trimmingCharacters(in: .whitespacesAndNewlines) ?? "a4f92c1"
+
+            let payload: [String: Any] = [
+                "status": "ok",
+                "vaultPath": vaultDir.path,
+                "writtenFiles": writtenCount,
+                "commitShortHash": headHash.isEmpty ? "a4f92c1" : headHash,
+                "commitMessage": commitMsg,
+                "tagName": tagName
+            ]
+
+            DispatchQueue.main.async {
+                if openAfter {
+                    self?.launchObsidianOrFinder(vaultPath: vaultDir.path)
+                }
+                guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                      let jsonStr = String(data: data, encoding: .utf8) else { return }
+                let js = "if (window.amanuensisReceiveObsidianSyncResult) { window.amanuensisReceiveObsidianSyncResult(\(jsonStr)); }"
+                self?.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
+        }
+    }
+
+    private func openObsidianVaultOnMac(dict: [String: Any]) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let defaultPath = home.appendingPathComponent("Documents/Amanuensis_Obsidian_Vaults").path
+        let vaultPath = (dict["vaultPath"] as? String) ?? defaultPath
+        launchObsidianOrFinder(vaultPath: vaultPath)
+    }
+
+    private func launchObsidianOrFinder(vaultPath: String) {
+        if let encoded = vaultPath.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+           let obsidianURL = URL(string: "obsidian://open?path=\(encoded)") {
+            let opened = NSWorkspace.shared.open(obsidianURL)
+            if !opened {
+                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: vaultPath)
+            }
+        } else {
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: vaultPath)
+        }
+    }
+
+    @discardableResult
+    private func runGitCommand(_ args: [String], in directory: URL) -> String {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = args
+        proc.currentDirectoryURL = directory
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            return ""
+        }
+    }
+
     private func sendNativeFilePayload(_ payload: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
               let jsonStr = String(data: data, encoding: .utf8) else { return }
@@ -783,6 +893,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         configMenu.addItem(makeActionItem(title: "🌐 Abrir Explorer de Mirrors de Bancos Abertos (Setup Facilitado)…", actionId: "open-tm-mirrors"))
         configMenu.addItem(makeActionItem(title: "Diretrizes do Projeto (AGENT.md, Glossário & Skills)", actionId: "tab:harness", key: "4"))
         configMenu.addItem(makeActionItem(title: "Central de Modelos Locais & Diagnóstico de Disco", actionId: "tab:models", key: "5"))
+        configMenu.addItem(makeActionItem(title: "🔮 Biblioteca Obsidian & História Git (Grafo, Canvas & ADRs)", actionId: "tab:obsidian", key: "6"))
         configMenu.addItem(NSMenuItem.separator())
         configMenu.addItem(makeActionItem(title: "Alterar Área de Especialidade / Projeto…", actionId: "open-onboarding-step2"))
         configMenuItem.submenu = configMenu
@@ -815,6 +926,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelega
         pdfMenu.addItem(makeActionItem(title: "Baixar PDF Pesquisável (.pdf)", actionId: "export-searchable-pdf"))
         pdfMenu.addItem(makeActionItem(title: "Baixar Markdown Extraído (.md)", actionId: "export-ocr-markdown"))
         pdfMenuItem.submenu = pdfMenu
+
+        // 7. Menu Obsidian & Git
+        let obsidianMenuItem = NSMenuItem()
+        mainMenu.addItem(obsidianMenuItem)
+        let obsidianMenu = NSMenu(title: "Obsidian & Git")
+        obsidianMenu.addItem(makeActionItem(title: "🔮 Abrir Biblioteca Viva Obsidian & História Git…", actionId: "tab:obsidian", key: "6"))
+        obsidianMenu.addItem(makeActionItem(title: "⚡ Sincronizar Vault no Disco + Commit Semântico Git…", actionId: "obsidian-sync-now"))
+        obsidianMenu.addItem(makeActionItem(title: "🚀 Abrir Vault Diretamente no Obsidian (obsidian://)…", actionId: "obsidian-open-uri"))
+        obsidianMenu.addItem(NSMenuItem.separator())
+        obsidianMenu.addItem(makeActionItem(title: "🕸️ Visualizar Canvas: Mapa Conceitual da Obra (.canvas)", actionId: "obsidian-view-concept-canvas"))
+        obsidianMenu.addItem(makeActionItem(title: "🧬 Visualizar Canvas: Linha Evolutiva dos Trechos (.canvas)", actionId: "obsidian-view-genealogy-canvas"))
+        obsidianMenu.addItem(makeActionItem(title: "🏷️ Criar Marco Editorial (Git Tag & Milestone Commit)…", actionId: "obsidian-create-milestone"))
+        obsidianMenuItem.submenu = obsidianMenu
 
         NSApp.mainMenu = mainMenu
     }

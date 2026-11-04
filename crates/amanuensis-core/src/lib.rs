@@ -1,5 +1,7 @@
+pub mod git_story;
 pub mod harness;
 pub mod llm;
+pub mod obsidian;
 pub mod ocr;
 pub mod project;
 pub mod tm;
@@ -550,5 +552,195 @@ CHAPTER II: DIALOGUES AND METRICS
         assert!(srt_res.formatting.audit.passed);
         assert_eq!(srt_res.formatting.segments.len(), 2);
         assert!(!srt_res.formatting.formatted_markdown.contains("-->"));
+    }
+
+    #[test]
+    fn test_git_story_semantic_commits_and_segment_genealogy() {
+        use crate::git_story::{GitStoryEngine, SegmentVersionStage, SemanticCommitKind};
+
+        let mut git_story = GitStoryEngine::new("Mayo Francés (1968)");
+        let gen1 = git_story.record_segment_revision(
+            10,
+            "La huelga general comenzó el 13 de mayo de 1968 en París.",
+            SegmentVersionStage::LocalAiDraft,
+            "A greve geral começou em 13 de maio de 1968 em Paris.",
+            "translategemma-4b-q4_k_m",
+            Some("Pós-rascunho automático via modelo local.".to_string()),
+        );
+        assert_eq!(gen1.revisions.last().unwrap().version_number, 1);
+
+        let gen2 = git_story.record_segment_revision(
+            10,
+            "La huelga general comenzó el 13 de mayo de 1968 en París.",
+            SegmentVersionStage::HumanPostEdit,
+            "A greve geral eclodiu em 13 de maio de 1968, em Paris.",
+            "Tradutor Humano (Pós-Edição)",
+            Some("ADR-002: verbo 'eclodiu' adotado para refletir o estilo historiográfico.".to_string()),
+        );
+        assert_eq!(gen2.revisions.last().unwrap().version_number, 2);
+
+        let commit = git_story.record_semantic_commit(
+            SemanticCommitKind::MilestoneTag,
+            "cap-01",
+            "fechamento da revisão crítica do Capítulo 1",
+            vec![10],
+            Some("v1.0-cap1-revisado".to_string()),
+            "100% confirmado",
+        );
+        assert!(commit
+            .summary
+            .starts_with("milestone(cap-01): fechamento"));
+
+        let gen = git_story.genealogies.get(&10).unwrap();
+        assert_eq!(gen.revisions.len(), 3); // v0 Original + v1 AI + v2 Human
+        let callout = gen.to_obsidian_callout();
+        assert!(callout.contains("História Git deste Trecho (`#10`)"));
+        assert!(callout.contains("ADR-002"));
+    }
+
+    #[test]
+    fn test_obsidian_vault_generation_and_json_canvas_topology() {
+        use crate::git_story::GitStoryEngine;
+        use crate::obsidian::{
+            ObsidianBilingualSegment, ObsidianDecisionRecord, ObsidianGlossaryEntry,
+            ObsidianVaultConfig, ObsidianVaultGenerator,
+        };
+
+        let git_story = GitStoryEngine::new("Mayo Francés (1968)");
+        let config = ObsidianVaultConfig {
+            project_name: "Mayo Francés (1968)".to_string(),
+            author_name: "Xavier Vigna & Coletivo".to_string(),
+            translator_name: "Scriptorium Amanuensis".to_string(),
+            source_lang: "es-ES".to_string(),
+            target_lang: "pt-BR".to_string(),
+            domain_specialty: "Ciências Sociais & História Política".to_string(),
+            model_id: "translategemma-4b-q4_k_m".to_string(),
+        };
+
+        let segments = vec![ObsidianBilingualSegment {
+            id: "seg-1".to_string(),
+            index: 0,
+            chapter_title: "Capítulo 1".to_string(),
+            source_text: "Mayo francés: cuando obreros y estudiantes desafiaron al poder en 1968."
+                .to_string(),
+            target_text:
+                "Maio francês: quando operários e estudantes desafiaram o poder em 1968."
+                    .to_string(),
+            status: "Confirmed".to_string(),
+            page_number: 1,
+            linked_concepts: vec!["Obreros".to_string(), "Huelga_General".to_string()],
+            linked_adrs: vec!["ADR-001-Obreros-Operarios".to_string()],
+        }];
+
+        let glossary = vec![ObsidianGlossaryEntry {
+            slug: "Obreros".to_string(),
+            source_term: "obreros".to_string(),
+            target_term: "operários".to_string(),
+            rejected_alternatives: vec!["trabalhadores genéricos".to_string()],
+            etymology_and_context:
+                "Preserva o recorte classista fabril das fábricas Renault e Citroën em 1968."
+                    .to_string(),
+            occurrences_segment_ids: vec!["seg-1".to_string()],
+        }];
+
+        let adrs = vec![ObsidianDecisionRecord {
+            adr_id: "ADR-001-Obreros-Operarios".to_string(),
+            title: "Distinção entre Obreros (Operários) e Trabajadores".to_string(),
+            status: "Aceito".to_string(),
+            context_problem: "Em espanhol, 'obreros' designa especificamente o proletariado industrial nos textos de 1968.".to_string(),
+            adopted_decision: "Traduzir sistematicamente 'obreros' por 'operários' e reservar 'trabalhadores' para 'trabajadores'.".to_string(),
+            affected_concepts: vec!["Obreros".to_string()],
+            affected_segments: vec!["seg-1".to_string()],
+        }];
+
+        let bundle = ObsidianVaultGenerator::generate_vault(
+            &config,
+            &segments,
+            &glossary,
+            &adrs,
+            &git_story,
+        )
+        .unwrap();
+
+        assert!(bundle.notes.len() >= 7);
+        assert_eq!(bundle.canvases.len(), 2);
+        assert!(bundle.graph_config_json.contains("01_Manuscrito_Bilingue"));
+        assert!(!bundle.canvases[0].nodes.is_empty());
+        assert!(!bundle.canvases[0].edges.is_empty());
+    }
+
+    #[test]
+    fn test_obsidian_byte_preserving_roundtrip_and_validation_gates() {
+        use crate::obsidian::ObsidianVaultGenerator;
+        use std::collections::BTreeMap;
+
+        let user_edited_md = r#"---
+title: "📖 Manuscrito Bilíngue — Mayo Francés"
+source_lang: "es-ES"
+target_lang: "pt-BR"
+status_editorial: "Revisão Filológica Final"
+revisor_chefe: "Helena"
+tags:
+  - amanuensis/manuscrito
+---
+
+# 📖 Manuscrito Bilíngue
+
+<!-- OBSIDIAN_USER_NOTES_START -->
+> [!tip] Nota da Revisora no Obsidian
+> Conferir epígrafe com a edição francesa de 1968 da Maspero.
+<!-- OBSIDIAN_USER_NOTES_END -->
+
+## Trecho #1 (`seg-1`) ^seg-seg-1
+- **Conceitos:** [[Obreros]], [[Huelga_General]]
+
+<!-- AMANUENSIS_TARGET_START:seg-1 -->
+Maio francês: quando os operários e estudantes desafiaram o poder em 1968 (Revisado no Obsidian).
+<!-- AMANUENSIS_TARGET_END:seg-1 -->
+"#;
+
+        let mut app_updates = BTreeMap::new();
+        let report = ObsidianVaultGenerator::byte_preserving_roundtrip_merge(
+            user_edited_md,
+            &app_updates,
+            &["1968".to_string()],
+        );
+
+        assert!(report.validation.yaml_frontmatter_valid);
+        assert!(report.validation.wikilinks_balanced_and_valid);
+        assert!(report.validation.numeric_invariance_passed);
+        assert_eq!(
+            report
+                .preserved_custom_yaml_keys
+                .get("status_editorial")
+                .map(|s| s.as_str()),
+            Some("Revisão Filológica Final")
+        );
+        assert_eq!(
+            report
+                .preserved_custom_yaml_keys
+                .get("revisor_chefe")
+                .map(|s| s.as_str()),
+            Some("Helena")
+        );
+        assert_eq!(report.preserved_user_callouts.len(), 1);
+        assert!(report.updated_segments["seg-1"].contains("(Revisado no Obsidian)"));
+
+        // Now test updating from Amanuensis while preserving Obsidian custom YAML & callouts
+        app_updates.insert(
+            "seg-1".to_string(),
+            "Maio francês: quando operários e estudantes desafiaram o poder em 1968 (Sincronizado v3)."
+                .to_string(),
+        );
+        let report2 = ObsidianVaultGenerator::byte_preserving_roundtrip_merge(
+            user_edited_md,
+            &app_updates,
+            &["1968".to_string()],
+        );
+        assert!(report2.merged_markdown.contains("Sincronizado v3"));
+        assert!(report2.merged_markdown.contains("status_editorial: \"Revisão Filológica Final\""));
+        assert!(report2
+            .merged_markdown
+            .contains("Conferir epígrafe com a edição francesa"));
     }
 }

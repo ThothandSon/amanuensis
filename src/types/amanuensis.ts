@@ -163,3 +163,76 @@ export interface OpenMirrorBankSpec {
   install_stage_label?: string;
   install_speed_mbps?: string;
 }
+
+export type SemanticCommitKind = 'ingest' | 'translate' | 'harness' | 'milestone' | 'obsidian';
+
+export interface SemanticGitCommit {
+  commit_hash: string;
+  short_hash: string;
+  kind: SemanticCommitKind;
+  scope: string;
+  summary: string;
+  timestamp_iso: string;
+  author: string;
+  affected_segments: number[];
+  tag_name?: string;
+  stats_note: string;
+}
+
+export type SegmentVersionStage =
+  | 'OriginalSource'
+  | 'LocalAiDraft'
+  | 'HumanPostEdit'
+  | 'ZenModeRefinement'
+  | 'ObsidianRoundTrip';
+
+export interface SegmentRevisionEntry {
+  version_number: number;
+  stage: SegmentVersionStage;
+  stage_label: string;
+  text: string;
+  commit_short_hash: string;
+  timestamp_label: string;
+  model_or_author: string;
+  rationale_or_adr?: string;
+}
+
+export interface ObsidianAdrRecord {
+  adr_id: string;
+  title: string;
+  status: 'Aceito' | 'Em Revisão' | 'Superado';
+  context_problem: string;
+  adopted_decision: string;
+  affected_concepts: string[];
+  affected_segments: number[];
+}
+
+export interface CanvasNode {
+  id: string;
+  type: 'text' | 'file' | 'group';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color?: string;
+  text?: string;
+  file?: string;
+  label?: string;
+}
+
+export interface CanvasEdge {
+  id: string;
+  fromNode: string;
+  fromSide: 'top' | 'right' | 'bottom' | 'left';
+  toNode: string;
+  toSide: 'top' | 'right' | 'bottom' | 'left';
+  label?: string;
+  color?: string;
+}
+
+export interface ObsidianVaultNote {
+  relative_path: string;
+  category: 'MOC' | 'Manuscrito' | 'Conceito' | 'ADR' | 'Canvas' | 'GitStory' | 'Config';
+  content: string;
+}
+
