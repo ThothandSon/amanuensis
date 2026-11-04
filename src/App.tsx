@@ -25,6 +25,11 @@ import {
   AutoAssembleFragment,
   AutoAssembleResult,
   AutoWriteSuggestion,
+  ContextualExceptionRecord,
+  AutoPropagationOutcome,
+  GlobalSearchScope,
+  GlobalSearchStatusFilter,
+  GlobalRegexPreviewItem,
 } from './types/amanuensis';
 
 const SAMPLE_SCANNED_PDFS = [
@@ -1522,6 +1527,221 @@ function computeDynamicAutoWriteSuggestions(
   }
 
   return suggestions.slice(0, 4);
+}
+
+// ============================================================================
+// ISSUE #4: OMEGAT SMART AUTO-PROPAGATION, CONTEXTUAL EXCEPTIONS & GLOBAL REGEX
+// ============================================================================
+function computeSegmentContextHash(
+  prevSource: string | undefined,
+  currentSource: string,
+  nextSource: string | undefined
+): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  const feed = (str: string) => {
+    const norm = str.trim().toLowerCase();
+    for (let i = 0; i < norm.length; i++) {
+      const code = norm.charCodeAt(i);
+      h1 ^= code;
+      h1 = Math.imul(h1, 0x01000193) >>> 0;
+      h2 ^= code + (i & 0xff);
+      h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+    }
+    h1 ^= 0xff;
+  };
+  feed(prevSource || '__START_OF_DOCUMENT__');
+  feed(currentSource);
+  feed(nextSource || '__END_OF_DOCUMENT__');
+  return `ctx-${h1.toString(16).padStart(8, '0')}${(h2 & 0xffff).toString(16).padStart(4, '0')}`;
+}
+
+function normalizeSegmentSourceForPropagation(text: string): string {
+  return text.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function autoPropagateConfirmedSegment(
+  segments: TranslationSegment[],
+  triggerIndex: number,
+  exceptions: ContextualExceptionRecord[]
+): { nextSegments: TranslationSegment[]; outcome: AutoPropagationOutcome } {
+  const triggerSeg = segments[triggerIndex];
+  if (!triggerSeg) {
+    return {
+      nextSegments: segments,
+      outcome: {
+        trigger_segment_index: triggerIndex,
+        normalized_source: '',
+        propagated_target: '',
+        updated_segment_indices: [],
+        skipped_exception_indices: [],
+        trigger_is_contextual_exception: false,
+        trigger_context_hash: '',
+      },
+    };
+  }
+
+  const prevSrc = triggerIndex > 0 ? segments[triggerIndex - 1]?.source_text : undefined;
+  const nextSrc =
+    triggerIndex + 1 < segments.length ? segments[triggerIndex + 1]?.source_text : undefined;
+  const triggerCtxHash = computeSegmentContextHash(prevSrc, triggerSeg.source_text, nextSrc);
+  const normTrigger = normalizeSegmentSourceForPropagation(triggerSeg.source_text);
+  const triggerIsException = exceptions.some(
+    (ex) => ex.segment_index === triggerIndex || ex.context_hash === triggerCtxHash
+  );
+
+  const updatedIndices: number[] = [];
+  const skippedExceptionIndices: number[] = [];
+
+  const nextSegments = segments.map((seg, idx) => {
+    if (idx === triggerIndex) {
+      return {
+        ...seg,
+        status: 'Approved' as const,
+      };
+    }
+    if (normalizeSegmentSourceForPropagation(seg.source_text) !== normTrigger) {
+      return seg;
+    }
+    const pSrc = idx > 0 ? segments[idx - 1]?.source_text : undefined;
+    const nSrc = idx + 1 < segments.length ? segments[idx + 1]?.source_text : undefined;
+    const candCtxHash = computeSegmentContextHash(pSrc, seg.source_text, nSrc);
+    const candIsException = exceptions.some(
+      (ex) => ex.segment_index === idx || ex.context_hash === candCtxHash
+    );
+
+    if (triggerIsException) {
+      if (candCtxHash === triggerCtxHash) {
+        updatedIndices.push(idx);
+        return {
+          ...seg,
+          target_text: triggerSeg.target_text,
+          status: 'Approved' as const,
+        };
+      }
+      skippedExceptionIndices.push(idx);
+      return seg;
+    }
+
+    if (candIsException) {
+      skippedExceptionIndices.push(idx);
+      return seg;
+    }
+
+    updatedIndices.push(idx);
+    return {
+      ...seg,
+      target_text: triggerSeg.target_text,
+      status: 'Approved' as const,
+    };
+  });
+
+  return {
+    nextSegments,
+    outcome: {
+      trigger_segment_index: triggerIndex,
+      normalized_source: normTrigger,
+      propagated_target: triggerSeg.target_text,
+      updated_segment_indices: updatedIndices,
+      skipped_exception_indices: skippedExceptionIndices,
+      trigger_is_contextual_exception: triggerIsException,
+      trigger_context_hash: triggerCtxHash,
+    },
+  };
+}
+
+function previewGlobalRegexSearchAndReplace(
+  segments: TranslationSegment[],
+  queryPattern: string,
+  replacementPattern: string,
+  useRegex: boolean,
+  caseSensitive: boolean,
+  scope: GlobalSearchScope,
+  statusFilter: GlobalSearchStatusFilter,
+  exceptions: ContextualExceptionRecord[]
+): { previews: GlobalRegexPreviewItem[]; regexError: string | null } {
+  if (!queryPattern.trim()) {
+    return { previews: [], regexError: null };
+  }
+
+  let compiledRegex: RegExp | null = null;
+  try {
+    const flags = caseSensitive ? 'g' : 'gi';
+    if (useRegex) {
+      compiledRegex = new RegExp(queryPattern, flags);
+    } else {
+      const escaped = queryPattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      compiledRegex = new RegExp(escaped, flags);
+    }
+  } catch (err) {
+    return {
+      previews: [],
+      regexError: err instanceof Error ? err.message : 'Expressão regular inválida',
+    };
+  }
+
+  // Count repeated segments for RepeatedSegmentsOnly filter
+  const sourceCounts = new Map<string, number>();
+  segments.forEach((s) => {
+    const norm = normalizeSegmentSourceForPropagation(s.source_text);
+    sourceCounts.set(norm, (sourceCounts.get(norm) || 0) + 1);
+  });
+
+  const previews: GlobalRegexPreviewItem[] = [];
+
+  segments.forEach((seg, idx) => {
+    const statusOk =
+      statusFilter === 'AllSegments'
+        ? true
+        : statusFilter === 'ConfirmedOnly'
+        ? seg.status === 'Approved' || seg.status === 'Translated'
+        : statusFilter === 'DraftsAndUntranslatedOnly'
+        ? seg.status === 'AiDraft' || seg.status === 'Untranslated'
+        : (sourceCounts.get(normalizeSegmentSourceForPropagation(seg.source_text)) || 0) >= 2;
+
+    if (!statusOk) return;
+
+    const prevSrc = idx > 0 ? segments[idx - 1]?.source_text : undefined;
+    const nextSrc = idx + 1 < segments.length ? segments[idx + 1]?.source_text : undefined;
+    const ctxHash = computeSegmentContextHash(prevSrc, seg.source_text, nextSrc);
+    const isExc = exceptions.some((e) => e.segment_index === idx || e.context_hash === ctxHash);
+
+    if (scope === 'BothSourceAndTarget' || scope === 'TargetOnly') {
+      const matches = Array.from(seg.target_text.matchAll(compiledRegex!)).map((m) => m[0]);
+      if (matches.length > 0) {
+        const afterText = seg.target_text.replace(compiledRegex!, replacementPattern);
+        previews.push({
+          segment_index: idx,
+          segment_id: seg.id,
+          field_matched: 'target',
+          matched_substrings: matches,
+          before_text: seg.target_text,
+          after_preview_text: afterText,
+          context_hash: ctxHash,
+          is_contextual_exception: isExc,
+        });
+      }
+    }
+
+    if (scope === 'BothSourceAndTarget' || scope === 'SourceOnly') {
+      const matches = Array.from(seg.source_text.matchAll(compiledRegex!)).map((m) => m[0]);
+      if (matches.length > 0) {
+        const afterText = seg.source_text.replace(compiledRegex!, replacementPattern);
+        previews.push({
+          segment_index: idx,
+          segment_id: seg.id,
+          field_matched: 'source',
+          matched_substrings: matches,
+          before_text: seg.source_text,
+          after_preview_text: afterText,
+          context_hash: ctxHash,
+          is_contextual_exception: isExc,
+        });
+      }
+    }
+  });
+
+  return { previews, regexError: null };
 }
 
 const INITIAL_AGENT_MD = `# AGENT.md — Project Translation Harness: Tratado de Tradução & Humanidades
@@ -4306,6 +4526,227 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
     );
   };
 
+  // ============================================================================
+  // ISSUE #4: OMEGAT AUTO-PROPAGATION, CONTEXTUAL EXCEPTIONS & GLOBAL REGEX (Cmd+Shift+F)
+  // ============================================================================
+  const [contextualExceptions, setContextualExceptions] = useState<ContextualExceptionRecord[]>([]);
+  const [lastPropagationOutcome, setLastPropagationOutcome] =
+    useState<AutoPropagationOutcome | null>(null);
+  const [showGlobalRegexDrawer, setShowGlobalRegexDrawer] = useState<boolean>(false);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState<string>(
+    '(?:Memória de Tradução|fidelidade)'
+  );
+  const [globalReplaceText, setGlobalReplaceText] = useState<string>('$&');
+  const [globalUseRegex, setGlobalUseRegex] = useState<boolean>(true);
+  const [globalCaseSensitive, setGlobalCaseSensitive] = useState<boolean>(false);
+  const [globalSearchScope, setGlobalSearchScope] =
+    useState<GlobalSearchScope>('BothSourceAndTarget');
+  const [globalStatusFilter, setGlobalStatusFilter] =
+    useState<GlobalSearchStatusFilter>('AllSegments');
+
+  const globalRegexPreview = useMemo(() => {
+    return previewGlobalRegexSearchAndReplace(
+      segments,
+      globalSearchQuery,
+      globalReplaceText,
+      globalUseRegex,
+      globalCaseSensitive,
+      globalSearchScope,
+      globalStatusFilter,
+      contextualExceptions
+    );
+  }, [
+    segments,
+    globalSearchQuery,
+    globalReplaceText,
+    globalUseRegex,
+    globalCaseSensitive,
+    globalSearchScope,
+    globalStatusFilter,
+    contextualExceptions,
+  ]);
+
+  // Count how many times each normalized source segment repeats across the work
+  const segmentRepetitionCounts = useMemo(() => {
+    const counts = new Map<string, number[]>();
+    segments.forEach((seg, idx) => {
+      const norm = normalizeSegmentSourceForPropagation(seg.source_text);
+      const list = counts.get(norm) || [];
+      list.push(idx);
+      counts.set(norm, list);
+    });
+    return counts;
+  }, [segments]);
+
+  const handleToggleContextualException = useCallback(
+    (idx: number) => {
+      const seg = segments[idx];
+      if (!seg) return;
+      const prevSrc = idx > 0 ? segments[idx - 1]?.source_text : undefined;
+      const nextSrc = idx + 1 < segments.length ? segments[idx + 1]?.source_text : undefined;
+      const ctxHash = computeSegmentContextHash(prevSrc, seg.source_text, nextSrc);
+
+      setContextualExceptions((prev) => {
+        const exists = prev.some((e) => e.segment_index === idx || e.context_hash === ctxHash);
+        if (exists) {
+          setStatusNotice(
+            `🔁 Exceção Contextual removida do Trecho #${idx + 1} (${ctxHash}). Ele voltará a participar da Auto-Propagação global.`
+          );
+          return prev.filter((e) => e.segment_index !== idx && e.context_hash !== ctxHash);
+        }
+        const record: ContextualExceptionRecord = {
+          segment_id: seg.id,
+          segment_index: idx,
+          source_text: seg.source_text,
+          alternative_target_text:
+            seg.target_text ||
+            generateLocalTranslation(seg.source_text, activeModel.name, glossary, learnedRules),
+          context_hash: ctxHash,
+          prev_snippet: (prevSrc || '— [Início da Obra]').slice(0, 72),
+          next_snippet: (nextSrc || '— [Fim da Obra]').slice(0, 72),
+          rationale_note: `Tradução Alternativa vinculada ao contexto (${ctxHash}: ¶ anterior + ¶ posterior)`,
+        };
+        setStatusNotice(
+          `🔀 [Exceção Contextual Criada — OmegaT] Trecho #${idx + 1} vinculado ao hash de contexto ${ctxHash} (¶ Ant. + ¶ Post.). Auto-propagações globais não sobrescreverão esta tradução alternativa!`
+        );
+        return [...prev, record];
+      });
+    },
+    [segments, activeModel.name, glossary, learnedRules]
+  );
+
+  const handleMergeWithNextSegment = useCallback(
+    (idx: number) => {
+      if (idx + 1 >= segments.length) return;
+      const cur = segments[idx];
+      const nxt = segments[idx + 1];
+      if (!cur || !nxt) return;
+
+      const mergedSeg: TranslationSegment = {
+        ...cur,
+        source_text: `${cur.source_text.trim()} ${nxt.source_text.trim()}`,
+        target_text: [cur.target_text.trim(), nxt.target_text.trim()].filter(Boolean).join(' '),
+        bbox: {
+          ...cur.bbox,
+          height: Math.min(0.45, cur.bbox.height + nxt.bbox.height),
+        },
+      };
+
+      setSegments((prev) => {
+        const nextList = [...prev.slice(0, idx), mergedSeg, ...prev.slice(idx + 2)].map((s, i) => ({
+          ...s,
+          index: i,
+        }));
+        return nextList;
+      });
+      setStatusNotice(
+        `🔗 Trechos #${idx + 1} e #${idx + 2} unidos com sucesso em um único segmento contextual!`
+      );
+    },
+    [segments]
+  );
+
+  const handleSplitSegmentAtPunctuation = useCallback(
+    (idx: number) => {
+      const cur = segments[idx];
+      if (!cur) return;
+      const src = cur.source_text.trim();
+      const splitMatch = src.match(/^(.+?[.!?;:])\s+(.+)$/s);
+      if (!splitMatch) {
+        setStatusNotice(
+          `ℹ️ O Trecho #${idx + 1} já é uma frase curta única (sem ponto intermediário para dividir).`
+        );
+        return;
+      }
+      const [, firstPart, secondPart] = splitMatch;
+      const tgt = cur.target_text.trim();
+      const tgtSplit = tgt.match(/^(.+?[.!?;:])\s+(.+)$/s);
+
+      const segA: TranslationSegment = {
+        ...cur,
+        id: `${cur.id}-a`,
+        source_text: firstPart.trim(),
+        target_text: tgtSplit ? tgtSplit[1].trim() : tgt,
+        bbox: { ...cur.bbox, height: Math.max(0.06, cur.bbox.height / 2) },
+      };
+      const segB: TranslationSegment = {
+        ...cur,
+        id: `${cur.id}-b`,
+        source_text: secondPart.trim(),
+        target_text: tgtSplit ? tgtSplit[2].trim() : '',
+        status: tgtSplit ? cur.status : 'Untranslated',
+        bbox: {
+          ...cur.bbox,
+          y: Math.min(0.9, cur.bbox.y + cur.bbox.height / 2),
+          height: Math.max(0.06, cur.bbox.height / 2),
+        },
+      };
+
+      setSegments((prev) =>
+        [...prev.slice(0, idx), segA, segB, ...prev.slice(idx + 1)].map((s, i) => ({
+          ...s,
+          index: i,
+        }))
+      );
+      setStatusNotice(
+        `✂️ Trecho #${idx + 1} dividido em dois segmentos independentes (#${idx + 1} e #${idx + 2})!`
+      );
+    },
+    [segments]
+  );
+
+  const handleApplySingleRegexPreview = useCallback((item: GlobalRegexPreviewItem) => {
+    setSegments((prev) =>
+      prev.map((s, i) => {
+        if (i !== item.segment_index) return s;
+        if (item.field_matched === 'target') {
+          return {
+            ...s,
+            target_text: item.after_preview_text,
+            status: s.status === 'Untranslated' ? 'Translated' : s.status,
+          };
+        }
+        return {
+          ...s,
+          source_text: item.after_preview_text,
+        };
+      })
+    );
+    setStatusNotice(
+      `🔎 Substituição Regex aplicada no Trecho #${item.segment_index + 1} (${
+        item.field_matched === 'target' ? 'Tradução' : 'Original'
+      })!`
+    );
+  }, []);
+
+  const handleApplyBatchRegexReplace = useCallback(() => {
+    if (globalRegexPreview.previews.length === 0) return;
+    const bySeg = new Map<number, { source?: string; target?: string }>();
+    globalRegexPreview.previews.forEach((p) => {
+      const cur = bySeg.get(p.segment_index) || {};
+      if (p.field_matched === 'target') cur.target = p.after_preview_text;
+      if (p.field_matched === 'source') cur.source = p.after_preview_text;
+      bySeg.set(p.segment_index, cur);
+    });
+
+    setSegments((prev) =>
+      prev.map((s, idx) => {
+        const patch = bySeg.get(idx);
+        if (!patch) return s;
+        return {
+          ...s,
+          source_text: patch.source !== undefined ? patch.source : s.source_text,
+          target_text: patch.target !== undefined ? patch.target : s.target_text,
+          status:
+            patch.target !== undefined && s.status === 'Untranslated' ? 'Translated' : s.status,
+        };
+      })
+    );
+    setStatusNotice(
+      `⚡ [Busca & Substituição Regex em Lote] ${globalRegexPreview.previews.length} ocorrências substituídas em ${bySeg.size} trechos do projeto!`
+    );
+  }, [globalRegexPreview.previews]);
+
   const handleConfirmAndEvolveHarness = useCallback(
     (idx: number) => {
       const seg = segments[idx];
@@ -4333,6 +4774,33 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
           .catch(() => {});
       }
 
+      // Compute Smart Auto-Propagation across identical segments while respecting Contextual Exceptions
+      const preUpdated = segments.map((s, i) =>
+        i === idx ? { ...s, target_text: finalTarget, status: 'Approved' as const } : s
+      );
+      const { nextSegments, outcome } = autoPropagateConfirmedSegment(
+        preUpdated,
+        idx,
+        contextualExceptions
+      );
+      setSegments(nextSegments);
+      setLastPropagationOutcome(outcome);
+
+      const propNote =
+        outcome.updated_segment_indices.length > 0
+          ? ` • 🔁 Auto-propagado para ${
+              outcome.updated_segment_indices.length
+            } trecho(s) idêntico(s) (#${outcome.updated_segment_indices
+              .map((n) => n + 1)
+              .join(', #')})${
+              outcome.skipped_exception_indices.length > 0
+                ? ` [${outcome.skipped_exception_indices.length} Exceção(ões) Contextual(is) preservada(s)]`
+                : ''
+            }!`
+          : outcome.skipped_exception_indices.length > 0
+          ? ` • 🔀 ${outcome.skipped_exception_indices.length} Exceção(ões) Contextual(is) preservada(s) intacta(s)!`
+          : '';
+
       if (seg.ai_draft_snapshot && seg.ai_draft_snapshot.trim() !== finalTarget) {
         const newRule: LearnedRule = {
           id: `rule-00${learnedRules.length + 1}`,
@@ -4344,19 +4812,14 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
         };
         setLearnedRules((prev) => [newRule, ...prev]);
         setStatusNotice(
-          `✓ Segmento #${idx + 1} confirmado! Nova regra aprendida no Harness do projeto e salva na TM Principal.`
+          `✓ Segmento #${idx + 1} confirmado! Nova regra aprendida no Harness e salva na TM Principal${propNote}`
         );
       } else {
         setStatusNotice(
-          `✓ Segmento #${idx + 1} aprovado e salvo na TM Principal (SQLite FTS5 + Vetor).`
+          `✓ Segmento #${idx + 1} aprovado e salvo na TM Principal (SQLite FTS5 + Vetor)${propNote}`
         );
       }
 
-      setSegments((prev) =>
-        prev.map((s, i) =>
-          i === idx ? { ...s, target_text: finalTarget, status: 'Approved' } : s
-        )
-      );
       setTmBanks((prev) =>
         prev.map((b) => (b.is_primary ? { ...b, entry_count: b.entry_count + 1 } : b))
       );
@@ -4415,8 +4878,8 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
             : `translate(seg-${idx + 1}): confirmação do trecho #${idx + 1} no manuscrito bilíngue`,
           timestamp_iso: new Date().toISOString().replace('T', ' ').slice(0, 19),
           author: 'Tradutor & Amanuensis Story Engine',
-          affected_segments: [idx + 1],
-          stats_note: `Trecho #${idx + 1} sincronizado na TM Principal e no Vault Obsidian`,
+          affected_segments: [idx + 1, ...outcome.updated_segment_indices.map((i) => i + 1)],
+          stats_note: `Trecho #${idx + 1} sincronizado na TM Principal e no Vault Obsidian${propNote}`,
         },
         ...prev,
       ]);
@@ -4425,7 +4888,14 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
         setActiveSegIdx(idx + 1);
       }
     },
-    [segments, activeModel.name, glossary, learnedRules, rustBridgeConnected]
+    [
+      segments,
+      activeModel.name,
+      glossary,
+      learnedRules,
+      rustBridgeConnected,
+      contextualExceptions,
+    ]
   );
 
   useEffect(() => {
@@ -4439,6 +4909,13 @@ Modelos de linguagem locais compactos alcançam notável fidelidade de traduçã
         e.preventDefault();
         setShowOnboarding(false);
         setZenMode((prev) => !prev);
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setShowOnboarding(false);
+        setActiveTab('workbench');
+        setShowGlobalRegexDrawer((prev) => !prev);
         return;
       }
       if (showOnboarding) return;
@@ -9013,6 +9490,14 @@ ${adr.adopted_decision}
                 </button>
                 <button
                   className="btn"
+                  style={{ fontSize: '0.72rem', padding: '2px 7px' }}
+                  onClick={() => setShowGlobalRegexDrawer((prev) => !prev)}
+                  title="Busca e Substituição Global com Expressões Regulares (Regex), filtro por Status/Escopo e pré-visualização de diff antes de substituir em lote (⌘⇧F — Inspirado no OmegaT)"
+                >
+                  🔎 Busca & Regex (⌘⇧F)
+                </button>
+                <button
+                  className="btn"
                   onClick={() => setZenMode(true)}
                   title="Ativar Modo Zen para foco criativo sem estímulos de tela (⌘\)"
                 >
@@ -9030,6 +9515,259 @@ ${adr.adopted_decision}
               </div>
             </div>
             <div className="pane-body">
+              {/* Issue #4: Global Regex Search & Replace Drawer (Cmd+Shift+F — OmegaT) */}
+              {showGlobalRegexDrawer && (
+                <div
+                  className="card"
+                  style={{
+                    marginBottom: '10px',
+                    border: '2px solid var(--accent)',
+                    background: 'var(--page-canvas)',
+                  }}
+                >
+                  <div className="card-title" style={{ flexWrap: 'wrap', gap: '6px' }}>
+                    <span>
+                      🔎 Busca e Substituição Global com Expressões Regulares (⌘⇧F — Inspirado no
+                      OmegaT)
+                    </span>
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                      <span className="badge badge-accent">
+                        {globalRegexPreview.previews.length} correspondência(s)
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-success"
+                        style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                        disabled={globalRegexPreview.previews.length === 0}
+                        onClick={handleApplyBatchRegexReplace}
+                      >
+                        ⚡ Substituir Tudo em Lote ({globalRegexPreview.previews.length})
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        style={{ fontSize: '0.72rem', padding: '2px 8px' }}
+                        onClick={() => setShowGlobalRegexDrawer(false)}
+                      >
+                        ✕ Fechar
+                      </button>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+                      gap: '8px',
+                      marginBottom: '8px',
+                    }}
+                  >
+                    <div>
+                      <label
+                        style={{
+                          fontSize: '0.7rem',
+                          fontWeight: 700,
+                          display: 'block',
+                          marginBottom: '2px',
+                        }}
+                      >
+                        Buscar (Texto Exato ou Regex):
+                      </label>
+                      <input
+                        className="input-text"
+                        value={globalSearchQuery}
+                        onChange={(e) => setGlobalSearchQuery(e.target.value)}
+                        placeholder="Ex.: (?:trabalhadores|operários) ou \b\d+\b"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        style={{
+                          fontSize: '0.7rem',
+                          fontWeight: 700,
+                          display: 'block',
+                          marginBottom: '2px',
+                        }}
+                      >
+                        Substituir por (suporta $& e grupos $1):
+                      </label>
+                      <input
+                        className="input-text"
+                        value={globalReplaceText}
+                        onChange={(e) => setGlobalReplaceText(e.target.value)}
+                        placeholder="Texto ou grupo de captura ($1)..."
+                      />
+                    </div>
+                    <div>
+                      <label
+                        style={{
+                          fontSize: '0.7rem',
+                          fontWeight: 700,
+                          display: 'block',
+                          marginBottom: '2px',
+                        }}
+                      >
+                        Escopo do Projeto:
+                      </label>
+                      <select
+                        className="select-pill"
+                        style={{ width: '100%' }}
+                        value={globalSearchScope}
+                        onChange={(e) => setGlobalSearchScope(e.target.value as GlobalSearchScope)}
+                      >
+                        <option value="BothSourceAndTarget">
+                          📖 Original + Tradução (Bilíngue)
+                        </option>
+                        <option value="TargetOnly">✍️ Apenas Tradução</option>
+                        <option value="SourceOnly">🔍 Apenas Original (Correção OCR)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label
+                        style={{
+                          fontSize: '0.7rem',
+                          fontWeight: 700,
+                          display: 'block',
+                          marginBottom: '2px',
+                        }}
+                      >
+                        Filtro por Status / Repetição:
+                      </label>
+                      <select
+                        className="select-pill"
+                        style={{ width: '100%' }}
+                        value={globalStatusFilter}
+                        onChange={(e) =>
+                          setGlobalStatusFilter(e.target.value as GlobalSearchStatusFilter)
+                        }
+                      >
+                        <option value="AllSegments">Todos os Trechos ({segments.length})</option>
+                        <option value="ConfirmedOnly">✓ Apenas Confirmados / Traduzidos</option>
+                        <option value="DraftsAndUntranslatedOnly">
+                          📝 Apenas Rascunhos IA & Não Traduzidos
+                        </option>
+                        <option value="RepeatedSegmentsOnly">
+                          🔁 Apenas Trechos Repetidos (Auto-Propagáveis)
+                        </option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: '10px',
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      marginBottom: '8px',
+                      fontSize: '0.74rem',
+                    }}
+                  >
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <input
+                        type="checkbox"
+                        checked={globalUseRegex}
+                        onChange={(e) => setGlobalUseRegex(e.target.checked)}
+                      />
+                      Usar Expressões Regulares (Regex)
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <input
+                        type="checkbox"
+                        checked={globalCaseSensitive}
+                        onChange={(e) => setGlobalCaseSensitive(e.target.checked)}
+                      />
+                      Diferenciar Maiúsculas/Minúsculas (Aa)
+                    </label>
+                    {lastPropagationOutcome &&
+                      lastPropagationOutcome.updated_segment_indices.length > 0 && (
+                        <span className="badge badge-exact">
+                          🔁 Última Auto-Propagação: #{lastPropagationOutcome.trigger_segment_index + 1}{' '}
+                          → #
+                          {lastPropagationOutcome.updated_segment_indices
+                            .map((i) => i + 1)
+                            .join(', #')}
+                        </span>
+                      )}
+                  </div>
+
+                  {globalRegexPreview.regexError ? (
+                    <div className="badge badge-fuzzy" style={{ padding: '6px 10px' }}>
+                      ⚠️ Erro na Expressão Regular: {globalRegexPreview.regexError}
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '6px',
+                        maxHeight: '210px',
+                        overflowY: 'auto',
+                      }}
+                    >
+                      {globalRegexPreview.previews.map((item, pIdx) => (
+                        <div
+                          key={`${item.segment_id}-${item.field_matched}-${pIdx}`}
+                          style={{
+                            padding: '6px 8px',
+                            background: 'var(--surface)',
+                            border: '1px solid var(--border-dark)',
+                            fontSize: '0.75rem',
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              marginBottom: '4px',
+                              flexWrap: 'wrap',
+                              gap: '4px',
+                            }}
+                          >
+                            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                              <strong>
+                                Trecho #{item.segment_index + 1} (
+                                {item.field_matched === 'target' ? 'Tradução' : 'Original'})
+                              </strong>
+                              <span className="badge badge-accent">{item.context_hash}</span>
+                              {item.is_contextual_exception && (
+                                <span className="badge badge-fuzzy">
+                                  🔀 Exceção Contextual Protegida
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              style={{ fontSize: '0.68rem', padding: '1px 7px' }}
+                              onClick={() => handleApplySingleRegexPreview(item)}
+                            >
+                              ↳ Substituir Neste Trecho
+                            </button>
+                          </div>
+                          <div>
+                            {computeWordDiff(item.before_text, item.after_preview_text).map(
+                              (tok, tIdx) =>
+                                tok.op === 'equal' ? (
+                                  <span key={tIdx}>{tok.text} </span>
+                                ) : tok.op === 'del' ? (
+                                  <span key={tIdx} className="diff-del">
+                                    {tok.text}{' '}
+                                  </span>
+                                ) : (
+                                  <span key={tIdx} className="diff-ins">
+                                    {tok.text}{' '}
+                                  </span>
+                                )
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               {/* Issue #3: Project Lexicon Extractor Drawer ("Build Lexicon" — Déjà Vu) */}
               {showLexiconExtractorDrawer && (
                 <div
@@ -9426,6 +10164,87 @@ ${adr.adopted_decision}
                               ? ` (${autoAssembleBySegIdx[idx].deterministic_coverage_pct}% det.)`
                               : ' (Montar)'}
                           </button>
+
+                          {/* Interactive Button 1E (Issue #4): Contextual Exception ("🔀 Exceção Contextual / Tradução Alternativa") */}
+                          {(() => {
+                            const prevSrc = idx > 0 ? segments[idx - 1]?.source_text : undefined;
+                            const nextSrc =
+                              idx + 1 < segments.length ? segments[idx + 1]?.source_text : undefined;
+                            const segCtxHash = computeSegmentContextHash(
+                              prevSrc,
+                              seg.source_text,
+                              nextSrc
+                            );
+                            const isCtxExc = contextualExceptions.some(
+                              (ex) => ex.segment_index === idx || ex.context_hash === segCtxHash
+                            );
+                            const repList =
+                              segmentRepetitionCounts.get(
+                                normalizeSegmentSourceForPropagation(seg.source_text)
+                              ) || [];
+
+                            return (
+                              <>
+                                {repList.length >= 2 && (
+                                  <span
+                                    className="badge badge-accent"
+                                    title={`Este trecho se repete ${
+                                      repList.length
+                                    }x na obra (Trechos #${repList
+                                      .map((r) => r + 1)
+                                      .join(
+                                        ', #'
+                                      )}). Confirmar auto-propaga automaticamente para as demais ocorrências que não sejam Exceção Contextual!`}
+                                  >
+                                    🔁 Repete {repList.length}x na Obra
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  className={`badge ${
+                                    isCtxExc ? 'badge-fuzzy' : 'badge-accent'
+                                  } badge-btn`}
+                                  title={`Criar ou remover Exceção Contextual ("Tradução Alternativa" — OmegaT) vinculada ao contexto (${segCtxHash}: ¶ Anterior + ¶ Posterior). Protege este trecho contra sobrescritas de Auto-Propagação!`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleToggleContextualException(idx);
+                                  }}
+                                >
+                                  {isCtxExc
+                                    ? `🔀 Exceção Contextual Ativa (${segCtxHash})`
+                                    : '🔀 Marcar Exceção Contextual'}
+                                </button>
+                              </>
+                            );
+                          })()}
+
+                          {/* Interactive Button 1F (Issue #4): Fluid Segment Merge & Split */}
+                          {idx + 1 < segments.length && (
+                            <button
+                              type="button"
+                              className="badge badge-btn"
+                              title="Unir este trecho com o próximo segmento em um único bloco contextual"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleMergeWithNextSegment(idx);
+                              }}
+                            >
+                              🔗 Unir c/ #{idx + 2}
+                            </button>
+                          )}
+                          {/[.!?;:]\s+\S/.test(seg.source_text.trim()) && (
+                            <button
+                              type="button"
+                              className="badge badge-btn"
+                              title="Dividir este trecho na pontuação intermediária em dois segmentos independentes"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSplitSegmentAtPunctuation(idx);
+                              }}
+                            >
+                              ✂️ Dividir
+                            </button>
+                          )}
 
                           {/* Interactive Button 2: Glossary Term Quick-Insert Buttons */}
                           {glossary

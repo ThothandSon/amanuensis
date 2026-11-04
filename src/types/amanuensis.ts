@@ -316,5 +316,47 @@ export interface AutoWriteSuggestion {
   source_origin_label: string;
 }
 
+// Issue #4: OmegaT-inspired Smart Auto-Propagation, Contextual Exceptions & Global Regex Search/Replace
+export interface ContextualExceptionRecord {
+  segment_id: string;
+  segment_index: number;
+  source_text: string;
+  alternative_target_text: string;
+  context_hash: string;
+  prev_snippet: string;
+  next_snippet: string;
+  rationale_note: string;
+}
+
+export interface AutoPropagationOutcome {
+  trigger_segment_index: number;
+  normalized_source: string;
+  propagated_target: string;
+  updated_segment_indices: number[];
+  skipped_exception_indices: number[];
+  trigger_is_contextual_exception: boolean;
+  trigger_context_hash: string;
+}
+
+export type GlobalSearchScope = 'BothSourceAndTarget' | 'TargetOnly' | 'SourceOnly';
+
+export type GlobalSearchStatusFilter =
+  | 'AllSegments'
+  | 'ConfirmedOnly'
+  | 'DraftsAndUntranslatedOnly'
+  | 'RepeatedSegmentsOnly';
+
+export interface GlobalRegexPreviewItem {
+  segment_index: number;
+  segment_id: string;
+  field_matched: 'target' | 'source';
+  matched_substrings: string[];
+  before_text: string;
+  after_preview_text: string;
+  context_hash: string;
+  is_contextual_exception: boolean;
+}
+
+
 
 

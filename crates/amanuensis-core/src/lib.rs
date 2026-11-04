@@ -5,6 +5,7 @@ pub mod livedocs;
 pub mod llm;
 pub mod obsidian;
 pub mod ocr;
+pub mod omegat_propagation;
 pub mod project;
 pub mod tm;
 
@@ -962,5 +963,182 @@ Maio francês: quando os operários e estudantes desafiaram o poder em 1968 (Rev
         assert!(!sugs.is_empty());
         assert_eq!(sugs[0].completion_full, "Memória de Tradução");
         assert_eq!(sugs[0].completion_suffix, "ria de Tradução");
+    }
+
+    #[test]
+    fn test_smart_auto_propagation_updates_identical_segments_and_respects_contextual_exceptions() {
+        use crate::ocr::BoundingBox;
+        use crate::omegat_propagation::{ContextualExceptionRecord, OmegaTPropagationEngine};
+        use crate::project::{SegmentStatus, TranslationSegment};
+
+        let make_seg = |idx: usize, src: &str, tgt: &str, status: SegmentStatus| TranslationSegment {
+            id: format!("seg-{}", idx + 1),
+            index: idx,
+            source_text: src.to_string(),
+            target_text: tgt.to_string(),
+            ai_draft_snapshot: None,
+            status,
+            bbox: BoundingBox {
+                page: 1,
+                x: 0.1,
+                y: 0.1,
+                width: 0.8,
+                height: 0.1,
+            },
+        };
+
+        let mut segments = vec![
+            make_seg(0, "## Chapter I — Prologue", "## Capítulo I — Prólogo", SegmentStatus::Approved),
+            make_seg(
+                1,
+                "Liberty requires institutional accountability.",
+                "A liberdade exige responsabilização institucional.",
+                SegmentStatus::Approved,
+            ),
+            make_seg(2, "First dialogue context.", "Primeiro contexto de diálogo.", SegmentStatus::Translated),
+            make_seg(
+                3,
+                "Liberty requires institutional accountability.",
+                "",
+                SegmentStatus::Untranslated,
+            ),
+            make_seg(4, "Irony and poetic context.", "Contexto irônico e poético.", SegmentStatus::Translated),
+            make_seg(
+                5,
+                "Liberty requires institutional accountability.",
+                "A liberdade reclama prestação de contas histórica (Tradução Alternativa Poética).",
+                SegmentStatus::Approved,
+            ),
+        ];
+
+        // Mark segment #5 (index 5) as a Contextual Exception ("Tradução Alternativa")
+        let mut exceptions: Vec<ContextualExceptionRecord> = Vec::new();
+        let exc = OmegaTPropagationEngine::register_contextual_exception(
+            &segments,
+            5,
+            "A liberdade reclama prestação de contas histórica (Tradução Alternativa Poética).",
+            "No capítulo poético final, 'requires accountability' assume registro clássico.",
+            &mut exceptions,
+        )
+        .unwrap();
+        assert!(exc.context_hash.starts_with("ctx-"));
+
+        // Confirm segment #1 (index 1) -> should auto-propagate to segment #3, but SKIP segment #5!
+        let outcome =
+            OmegaTPropagationEngine::auto_propagate_confirmed_segment(&mut segments, 1, &exceptions);
+
+        assert_eq!(outcome.updated_segment_indices, vec![3]);
+        assert_eq!(outcome.skipped_exception_indices, vec![5]);
+        assert_eq!(
+            segments[3].target_text,
+            "A liberdade exige responsabilização institucional."
+        );
+        assert_eq!(segments[3].status, SegmentStatus::Approved);
+        // Segment #5 must keep its alternative contextual translation intact!
+        assert_eq!(
+            segments[5].target_text,
+            "A liberdade reclama prestação de contas histórica (Tradução Alternativa Poética)."
+        );
+    }
+
+    #[test]
+    fn test_contextual_exception_hash_binds_translation_to_prev_and_next_neighbor_context() {
+        use crate::omegat_propagation::compute_segment_context_hash;
+
+        let h1 = compute_segment_context_hash(
+            Some("Chapter 1: Constitutional Foundations"),
+            "The Assembly voted unanimously.",
+            Some("Article 4 entered into force."),
+        );
+        let h2 = compute_segment_context_hash(
+            Some("Chapter 9: Student General Assembly in Sorbonne"),
+            "The Assembly voted unanimously.",
+            Some("Barricades were erected at night."),
+        );
+        let h1_repeat = compute_segment_context_hash(
+            Some("  chapter 1: constitutional foundations "),
+            "the assembly voted unanimously.",
+            Some("Article 4 entered into force."),
+        );
+
+        assert_ne!(h1, h2, "Different neighbor contexts must yield distinct context hashes");
+        assert_eq!(h1, h1_repeat, "Normalized identical context must yield deterministic hash");
+    }
+
+    #[test]
+    fn test_global_regex_search_and_batch_replace_with_diff_preview_and_status_filters() {
+        use crate::ocr::BoundingBox;
+        use crate::omegat_propagation::{
+            GlobalSearchScope, GlobalSearchStatusFilter, OmegaTPropagationEngine,
+        };
+        use crate::project::{SegmentStatus, TranslationSegment};
+
+        let mut segments = vec![
+            TranslationSegment {
+                id: "seg-1".to_string(),
+                index: 0,
+                source_text: "Workers and students challenged power in 1968.".to_string(),
+                target_text: "Trabalhadores e estudantes desafiaram o poder em 1968.".to_string(),
+                ai_draft_snapshot: None,
+                status: SegmentStatus::Approved,
+                bbox: BoundingBox {
+                    page: 1,
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.8,
+                    height: 0.1,
+                },
+            },
+            TranslationSegment {
+                id: "seg-2".to_string(),
+                index: 1,
+                source_text: "Factory committees united workers in Renault.".to_string(),
+                target_text: "Comitês de fábrica uniram trabalhadores na Renault.".to_string(),
+                ai_draft_snapshot: None,
+                status: SegmentStatus::AiDraft,
+                bbox: BoundingBox {
+                    page: 1,
+                    x: 0.1,
+                    y: 0.25,
+                    width: 0.8,
+                    height: 0.1,
+                },
+            },
+        ];
+
+        // 1. Dry-run preview (`apply_in_place = false`) on ConfirmedOnly
+        let preview_confirmed = OmegaTPropagationEngine::search_and_replace_segments(
+            &mut segments,
+            "trabalhadores",
+            "operários",
+            true,
+            false,
+            GlobalSearchScope::TargetOnly,
+            GlobalSearchStatusFilter::ConfirmedOnly,
+            &[],
+            false,
+        );
+        assert_eq!(preview_confirmed.affected_segments_count, 1);
+        assert!(preview_confirmed.previews[0]
+            .after_preview_text
+            .contains("operários e estudantes"));
+        // Not applied yet because apply_in_place == false
+        assert!(segments[0].target_text.contains("Trabalhadores"));
+
+        // 2. Apply batch replacement across AllSegments
+        let applied = OmegaTPropagationEngine::search_and_replace_segments(
+            &mut segments,
+            "trabalhadores",
+            "operários",
+            true,
+            false,
+            GlobalSearchScope::TargetOnly,
+            GlobalSearchStatusFilter::AllSegments,
+            &[],
+            true,
+        );
+        assert_eq!(applied.affected_segments_count, 2);
+        assert!(segments[0].target_text.contains("operários e estudantes"));
+        assert!(segments[1].target_text.contains("uniram operários na Renault"));
     }
 }
