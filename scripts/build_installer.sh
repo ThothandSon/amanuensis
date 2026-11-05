@@ -13,7 +13,7 @@ STAGE_APP="$STAGE_ROOT/Amanuensis.app"
 STAGE_DMG_DIR="$STAGE_ROOT/dmg_staging"
 OUT_DIR="release"
 APP_DIR="$OUT_DIR/Amanuensis.app"
-DMG_PATH="$OUT_DIR/Amanuensis_0.1.0_macOS_Installer.dmg"
+DMG_PATH="$OUT_DIR/Amanuensis_2.0.0_macOS_Installer.dmg"
 
 mkdir -p "$OUT_DIR"
 rm -rf "$APP_DIR" "$DMG_PATH"
@@ -49,9 +49,9 @@ cat > "$STAGE_APP/Contents/Info.plist" <<EOF
   <key>CFBundleIdentifier</key>
   <string>io.amanuensis.workbench</string>
   <key>CFBundleVersion</key>
-  <string>0.1.0</string>
+  <string>2.0.0</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>2.0.0</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>

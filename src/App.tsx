@@ -8591,7 +8591,7 @@ ${adr.adopted_decision}
                   </p>
                 </div>
               </div>
-              <span className="brand-badge">v1.0 Desktop</span>
+              <span className="brand-badge">v2.0 Desktop</span>
             </div>
 
             <div className="onboarding-steps-bar">

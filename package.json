@@ -1,7 +1,7 @@
 {
   "name": "amanuensis",
   "private": true,
-  "version": "0.1.0",
+  "version": "2.0.0",
   "description": "Next-generation CAT Workbench with Auxiliary TMs, Scanned PDF to Searchable PDF/Markdown Suite, and Evolving Local LLM Project Harness",
   "type": "module",
   "scripts": {
