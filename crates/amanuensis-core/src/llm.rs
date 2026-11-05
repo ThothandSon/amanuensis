@@ -22,7 +22,9 @@ impl HardwareProfile {
             .map(|n| n.get())
             .unwrap_or(8);
 
+        #[allow(unused_mut)]
         let mut cpu_brand = "Processador Multi-Core Moderno".to_string();
+        #[allow(unused_mut)]
         let mut total_ram_gb: u32 = 16;
 
         #[cfg(target_os = "macos")]
