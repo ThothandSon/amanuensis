@@ -155,7 +155,8 @@ impl ProjectHarness {
             id: "rule-001".to_string(),
             pattern_from: "banco de dados de tradução".to_string(),
             preferred_to: "banco de tradução auxiliar".to_string(),
-            rationale: "Preferência terminológica aprendida das edições do usuário neste projeto".to_string(),
+            rationale: "Preferência terminológica aprendida das edições do usuário neste projeto"
+                .to_string(),
             occurrences: 3,
             active: true,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -189,10 +190,7 @@ impl ProjectHarness {
 
         // Write dedicated Scan-to-Structure Formatting Harness (OCR_FORMAT_HARNESS.md)
         let ocr_harness = crate::ocr::OcrFormattingHarness::default();
-        fs::write(
-            base.join("OCR_FORMAT_HARNESS.md"),
-            &ocr_harness.harness_md,
-        )?;
+        fs::write(base.join("OCR_FORMAT_HARNESS.md"), &ocr_harness.harness_md)?;
 
         // Write skills/*.md with YAML frontmatter
         for skill in &self.skills {

@@ -64,9 +64,9 @@ pub struct SubtitleCueDiagnostic {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SubtitleCpsStatus {
-    Optimal,       // <= 17.0 CPS and <= 42 chars/line
-    WarningFast,   // > 17.0 and <= 20.0 CPS
-    ExceedsLimit,  // > 20.0 CPS or > 42 chars/line
+    Optimal,      // <= 17.0 CPS and <= 42 chars/line
+    WarningFast,  // > 17.0 and <= 20.0 CPS
+    ExceedsLimit, // > 20.0 CPS or > 42 chars/line
 }
 
 /// Engine for Issue #5:
@@ -91,7 +91,9 @@ impl BilingualReviewAndMediaEngine {
         out.push_str("<style>\n");
         out.push_str("body { font-family: 'Georgia', 'Times New Roman', serif; margin: 24px; color: #111; }\n");
         out.push_str("h1 { font-size: 18pt; margin-bottom: 4px; }\n");
-        out.push_str("p.meta { font-size: 10pt; color: #444; margin-top: 0; margin-bottom: 16px; }\n");
+        out.push_str(
+            "p.meta { font-size: 10pt; color: #444; margin-top: 0; margin-bottom: 16px; }\n",
+        );
         out.push_str("table { width: 100%; border-collapse: collapse; table-layout: fixed; }\n");
         out.push_str("th, td { border: 1px solid #333; padding: 8px 10px; vertical-align: top; font-size: 10.5pt; line-height: 1.45; word-wrap: break-word; }\n");
         out.push_str("th { background: #e8eef5; font-weight: bold; text-align: left; }\n");
@@ -251,10 +253,7 @@ impl BilingualReviewAndMediaEngine {
                                     clean_note
                                 )
                             } else {
-                                format!(
-                                    "Revisão Externa .docx aceita no Trecho #{}",
-                                    idx + 1
-                                )
+                                format!("Revisão Externa .docx aceita no Trecho #{}", idx + 1)
                             },
                             occurrences: 1,
                             active: true,
@@ -323,7 +322,10 @@ impl BilingualReviewAndMediaEngine {
             let mut xhtml = String::new();
             xhtml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
             xhtml.push_str("<!DOCTYPE html>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"pt-BR\">\n<head>\n  <meta charset=\"utf-8\"/>\n");
-            xhtml.push_str(&format!("  <title>{}</title>\n</head>\n<body>\n", escape_html(&chap.toc_title)));
+            xhtml.push_str(&format!(
+                "  <title>{}</title>\n</head>\n<body>\n",
+                escape_html(&chap.toc_title)
+            ));
             xhtml.push_str(&format!(
                 "  <section id=\"{}\" data-epub-href=\"{}\">\n    <h1>{}</h1>\n",
                 escape_html(&chap.chapter_id),
@@ -443,7 +445,10 @@ fn parse_timecode_range_ms(line: &str) -> (u64, u64) {
     if parts.len() != 2 {
         return (0, 2000);
     }
-    (parse_single_timestamp_ms(parts[0]), parse_single_timestamp_ms(parts[1]))
+    (
+        parse_single_timestamp_ms(parts[0]),
+        parse_single_timestamp_ms(parts[1]),
+    )
 }
 
 fn parse_single_timestamp_ms(ts: &str) -> u64 {

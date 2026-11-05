@@ -137,13 +137,12 @@ impl OmegaTPropagationEngine {
         };
         let trigger_src = segments[trigger_index].source_text.clone();
         let trigger_tgt = segments[trigger_index].target_text.clone();
-        let trigger_ctx_hash =
-            compute_segment_context_hash(prev_src, &trigger_src, next_src);
+        let trigger_ctx_hash = compute_segment_context_hash(prev_src, &trigger_src, next_src);
 
         let norm_trigger_src = normalize_segment_source(&trigger_src);
-        let trigger_is_exception = exceptions.iter().any(|ex| {
-            ex.segment_index == trigger_index || ex.context_hash == trigger_ctx_hash
-        });
+        let trigger_is_exception = exceptions
+            .iter()
+            .any(|ex| ex.segment_index == trigger_index || ex.context_hash == trigger_ctx_hash);
 
         let mut updated_indices = Vec::new();
         let mut skipped_exceptions = Vec::new();
@@ -169,9 +168,9 @@ impl OmegaTPropagationEngine {
             let candidate_ctx_hash =
                 compute_segment_context_hash(p_src, &segments[idx].source_text, n_src);
 
-            let candidate_is_exception = exceptions.iter().any(|ex| {
-                ex.segment_index == idx || ex.context_hash == candidate_ctx_hash
-            });
+            let candidate_is_exception = exceptions
+                .iter()
+                .any(|ex| ex.segment_index == idx || ex.context_hash == candidate_ctx_hash);
 
             if trigger_is_exception {
                 // Only propagate to another segment if it has the exact same neighbor context hash
@@ -231,8 +230,16 @@ impl OmegaTPropagationEngine {
             source_text: seg.source_text.clone(),
             alternative_target_text: alternative_target.to_string(),
             context_hash: ctx_hash.clone(),
-            prev_snippet: prev_src.unwrap_or("— [Início da Obra]").chars().take(72).collect(),
-            next_snippet: next_src.unwrap_or("— [Fim da Obra]").chars().take(72).collect(),
+            prev_snippet: prev_src
+                .unwrap_or("— [Início da Obra]")
+                .chars()
+                .take(72)
+                .collect(),
+            next_snippet: next_src
+                .unwrap_or("— [Fim da Obra]")
+                .chars()
+                .take(72)
+                .collect(),
             rationale_note: rationale_note.to_string(),
         };
 
@@ -244,6 +251,7 @@ impl OmegaTPropagationEngine {
     /// Previews (or applies when `apply_in_place == true`) a Global Search & Replace across all segments
     /// supporting both Exact and pattern/Regex-like capture (`$1`, `\b`, alternation `a|b`, case-insensitivity)
     /// and filtering by scope and segment status.
+    #[allow(clippy::too_many_arguments)]
     pub fn search_and_replace_segments(
         segments: &mut [TranslationSegment],
         query_pattern: &str,
@@ -442,9 +450,7 @@ fn match_and_replace_pattern(
             } else {
                 if !num_buf.is_empty() {
                     matched.push(num_buf.clone());
-                    let rep = replacement
-                        .replace("$1", &num_buf)
-                        .replace("$0", &num_buf);
+                    let rep = replacement.replace("$1", &num_buf).replace("$0", &num_buf);
                     new_out.push_str(&rep);
                     num_buf.clear();
                 }
@@ -453,9 +459,7 @@ fn match_and_replace_pattern(
         }
         if !num_buf.is_empty() {
             matched.push(num_buf.clone());
-            let rep = replacement
-                .replace("$1", &num_buf)
-                .replace("$0", &num_buf);
+            let rep = replacement.replace("$1", &num_buf).replace("$0", &num_buf);
             new_out.push_str(&rep);
         }
         return (matched, new_out);
@@ -471,9 +475,7 @@ fn match_and_replace_pattern(
                 let abs = cursor + pos;
                 let found = output[abs..abs + alt.len()].to_string();
                 matched.push(found.clone());
-                let rep = replacement
-                    .replace("$1", &found)
-                    .replace("$0", &found);
+                let rep = replacement.replace("$1", &found).replace("$0", &found);
                 output.replace_range(abs..abs + alt.len(), &rep);
                 cursor = abs + rep.len();
                 if rep.is_empty() && cursor < output.len() {
@@ -493,9 +495,7 @@ fn match_and_replace_pattern(
                     let found: String = rem.chars().take(char_cnt).collect();
                     let found_bytes = found.len();
                     matched.push(found.clone());
-                    let rep = replacement
-                        .replace("$1", &found)
-                        .replace("$0", &found);
+                    let rep = replacement.replace("$1", &found).replace("$0", &found);
                     rebuilt.push_str(&rep);
                     idx += found_bytes.max(1);
                 } else if let Some(first_ch) = rem.chars().next() {

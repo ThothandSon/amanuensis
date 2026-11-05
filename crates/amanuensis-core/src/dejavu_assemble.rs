@@ -53,10 +53,10 @@ impl DejaVuProductivityEngine {
     fn is_boundary_stopword(word: &str) -> bool {
         let stop: HashSet<&str> = [
             "the", "and", "for", "with", "that", "this", "from", "are", "was", "were", "have",
-            "has", "had", "not", "but", "when", "where", "which", "into", "over", "across",
-            "los", "las", "una", "uno", "unos", "unas", "por", "para", "con", "sin", "sobre",
-            "entre", "como", "más", "pero", "sus", "del", "al", "que", "uma", "uns", "umas",
-            "dos", "das", "nos", "nas", "pelo", "pela",
+            "has", "had", "not", "but", "when", "where", "which", "into", "over", "across", "los",
+            "las", "una", "uno", "unos", "unas", "por", "para", "con", "sin", "sobre", "entre",
+            "como", "más", "pero", "sus", "del", "al", "que", "uma", "uns", "umas", "dos", "das",
+            "nos", "nas", "pelo", "pela",
         ]
         .into_iter()
         .collect();
@@ -206,10 +206,10 @@ impl DejaVuProductivityEngine {
             origin: FragmentOrigin::LocalModelGrammarStitch,
         });
 
-        let deterministic_coverage_pct =
-            ((matched_source_words.min(total_source_words) as f32 / total_source_words as f32)
-                * 100.0)
-                .round();
+        let deterministic_coverage_pct = ((matched_source_words.min(total_source_words) as f32
+            / total_source_words as f32)
+            * 100.0)
+            .round();
 
         AutoAssembleResult {
             source_text: source_text.to_string(),

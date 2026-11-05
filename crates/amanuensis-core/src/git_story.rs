@@ -157,24 +157,24 @@ impl GitStoryEngine {
         let (_, short_hash) =
             Self::compute_deterministic_hash(&format!("{}:{}:{}", segment_index, text, seq), seq);
 
-        let entry_list = self
-            .genealogies
-            .entry(segment_index)
-            .or_insert_with(|| SegmentGenealogy {
-                segment_index,
-                source_text: source_text.to_string(),
-                current_target_text: String::new(),
-                revisions: vec![SegmentRevisionEntry {
-                    version_number: 0,
-                    stage: SegmentVersionStage::OriginalSource,
-                    stage_label: "Versão 0 (Original Extraído)".to_string(),
-                    text: source_text.to_string(),
-                    commit_short_hash: "0000base".to_string(),
-                    timestamp_label: "Importação Inicial".to_string(),
-                    model_or_author: "Documento Fonte / OCR".to_string(),
-                    rationale_or_adr: None,
-                }],
-            });
+        let entry_list =
+            self.genealogies
+                .entry(segment_index)
+                .or_insert_with(|| SegmentGenealogy {
+                    segment_index,
+                    source_text: source_text.to_string(),
+                    current_target_text: String::new(),
+                    revisions: vec![SegmentRevisionEntry {
+                        version_number: 0,
+                        stage: SegmentVersionStage::OriginalSource,
+                        stage_label: "Versão 0 (Original Extraído)".to_string(),
+                        text: source_text.to_string(),
+                        commit_short_hash: "0000base".to_string(),
+                        timestamp_label: "Importação Inicial".to_string(),
+                        model_or_author: "Documento Fonte / OCR".to_string(),
+                        rationale_or_adr: None,
+                    }],
+                });
 
         let next_ver = entry_list.revisions.len();
         let stage_label = match stage {

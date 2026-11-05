@@ -24,20 +24,15 @@ pub enum LayoutBlockKind {
 }
 
 /// Granularity profile for the Scan-to-Structure Formatting Harness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChunkGranularity {
     /// 1 sentence / short clause (~80–180 chars, max 220) — ideal for Modo Zen, poetry & dense dialogues
     ZenMicroSentence,
     /// 1–2 contextual sentences (~140–260 chars, max 320) — recommended default for CAT & local LLM
+    #[default]
     ContextualShort,
     /// 2–3 sentences (~240–380 chars, max 460) — editorial paragraph rhythm
     EditorialParagraph,
-}
-
-impl Default for ChunkGranularity {
-    fn default() -> Self {
-        Self::ContextualShort
-    }
 }
 
 impl ChunkGranularity {
@@ -228,8 +223,7 @@ impl OcrFormattingHarness {
         let mut dehyphenated_words_count = 0;
         if dehyp_skill_on {
             // Only join when the first part ends with 2+ letters + hyphen + newline + lowercase continuation
-            let hyph_re =
-                regex::Regex::new(r"([a-zA-ZÀ-ÿ]{2,})-\s*\n\s*([a-zà-ÿ]{2,})").unwrap();
+            let hyph_re = regex::Regex::new(r"([a-zA-ZÀ-ÿ]{2,})-\s*\n\s*([a-zà-ÿ]{2,})").unwrap();
             dehyphenated_words_count = hyph_re.find_iter(&normalized).count();
             normalized = hyph_re.replace_all(&normalized, "$1$2").to_string();
         }
@@ -271,40 +265,37 @@ impl OcrFormattingHarness {
         let mut chapters_and_headings_detected = 0;
         let mut frontmatter_blocks_grouped = 0;
 
-        let flush_prose =
-            |prose: &mut Vec<String>, out: &mut Vec<IntermediateBlock>| {
-                if !prose.is_empty() {
-                    out.push(IntermediateBlock {
-                        kind: LayoutBlockKind::Paragraph,
-                        context_label: "Parágrafo Contextual".to_string(),
-                        lines: std::mem::take(prose),
-                    });
-                }
-            };
-
-        let flush_table =
-            |table: &mut Vec<String>, out: &mut Vec<IntermediateBlock>| {
-                if !table.is_empty() {
-                    out.push(IntermediateBlock {
-                        kind: LayoutBlockKind::Table,
-                        context_label: "Tabela Estruturada".to_string(),
-                        lines: std::mem::take(table),
-                    });
-                }
-            };
-
-        let flush_frontmatter = |fm: &mut Vec<String>,
-                                 out: &mut Vec<IntermediateBlock>,
-                                 fm_cnt: &mut usize| {
-            if !fm.is_empty() {
-                *fm_cnt += 1;
+        let flush_prose = |prose: &mut Vec<String>, out: &mut Vec<IntermediateBlock>| {
+            if !prose.is_empty() {
                 out.push(IntermediateBlock {
-                    kind: LayoutBlockKind::Caption,
-                    context_label: "Ficha Catalográfica / Expediente".to_string(),
-                    lines: std::mem::take(fm),
+                    kind: LayoutBlockKind::Paragraph,
+                    context_label: "Parágrafo Contextual".to_string(),
+                    lines: std::mem::take(prose),
                 });
             }
         };
+
+        let flush_table = |table: &mut Vec<String>, out: &mut Vec<IntermediateBlock>| {
+            if !table.is_empty() {
+                out.push(IntermediateBlock {
+                    kind: LayoutBlockKind::Table,
+                    context_label: "Tabela Estruturada".to_string(),
+                    lines: std::mem::take(table),
+                });
+            }
+        };
+
+        let flush_frontmatter =
+            |fm: &mut Vec<String>, out: &mut Vec<IntermediateBlock>, fm_cnt: &mut usize| {
+                if !fm.is_empty() {
+                    *fm_cnt += 1;
+                    out.push(IntermediateBlock {
+                        kind: LayoutBlockKind::Caption,
+                        context_label: "Ficha Catalográfica / Expediente".to_string(),
+                        lines: std::mem::take(fm),
+                    });
+                }
+            };
 
         let cleaned_body_source = cleaned_lines.join("\n");
         for line in cleaned_lines {
@@ -450,7 +441,8 @@ impl OcrFormattingHarness {
                     let text = blk.lines.join("\n");
                     if text.chars().count() > self.granularity.hard_max_chars() {
                         giant_blocks_split_count += 1;
-                        let sub_chunks = split_prose_into_contextual_chunks(&text, self.granularity);
+                        let sub_chunks =
+                            split_prose_into_contextual_chunks(&text, self.granularity);
                         for (sc, sent_cnt) in sub_chunks {
                             let char_count = sc.chars().count();
                             let word_count = sc.split_whitespace().count();
@@ -670,7 +662,8 @@ impl OcrFormattingHarness {
             .map(|s| s.name.clone())
             .collect();
 
-        let passed = lexical_fidelity_pct >= 98.0 && numbers_preserved && zero_hallucination_verified;
+        let passed =
+            lexical_fidelity_pct >= 98.0 && numbers_preserved && zero_hallucination_verified;
 
         OcrFormattingAudit {
             passed,
@@ -897,7 +890,9 @@ fn split_into_sentences_abbreviation_safe(text: &str) -> Vec<String> {
 
 fn is_protected_abbreviation(word: &str) -> bool {
     let clean = word
-        .trim_matches(|c: char| c == '(' || c == ')' || c == '[' || c == ']' || c == '"' || c == '“')
+        .trim_matches(|c: char| {
+            c == '(' || c == ')' || c == '[' || c == ']' || c == '"' || c == '“'
+        })
         .to_lowercase();
 
     if !clean.ends_with('.') {
@@ -1144,10 +1139,12 @@ impl ScannedPdfSuite {
             .join("\n\n"),
         };
 
-        let mut formatting_harness = OcrFormattingHarness::default();
-        formatting_harness.granularity = config.chunk_granularity;
-        formatting_harness.dehyphenate_line_breaks = config.dehyphenate_line_breaks;
-        formatting_harness.strip_running_page_numbers = config.strip_headers_footers;
+        let formatting_harness = OcrFormattingHarness {
+            granularity: config.chunk_granularity,
+            dehyphenate_line_breaks: config.dehyphenate_line_breaks,
+            strip_running_page_numbers: config.strip_headers_footers,
+            ..Default::default()
+        };
 
         let formatting_res = formatting_harness.format_and_segment(&raw_combined);
 
@@ -1320,14 +1317,14 @@ fn synthesize_searchable_pdf(title: &str, blocks: &[OcrLayoutBlock]) -> Vec<u8> 
          %%EOF\n",
         stream.len(),
         stream,
-        title.replace('(', "").replace(')', "")
+        title.replace(['(', ')'], "")
     );
     pdf.into_bytes()
 }
 
 fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -1397,7 +1394,9 @@ impl DocumentIngestionMode {
     pub fn label_pt(&self) -> &'static str {
         match self {
             Self::ScannedPdfOcr => "🔍 PDF Escaneado (OCR Óptico + Estruturação)",
-            Self::NativeDigitalPdf => "📄 PDF Digital Nativo (Camada de Texto Instantânea, Sem OCR)",
+            Self::NativeDigitalPdf => {
+                "📄 PDF Digital Nativo (Camada de Texto Instantânea, Sem OCR)"
+            }
             Self::WordDocx => "📝 Documento Word (.docx / .rtf — Extração Estruturada)",
             Self::PlainTextOrMarkdown => "📑 Texto / Markdown / Legenda (.md, .txt, .srt)",
             Self::ClipboardPaste => "📋 Texto Colado Direto (Área de Transferência / Cmd+V)",
@@ -1483,10 +1482,9 @@ impl UniversalDocumentIngestor {
         if !filename.trim().to_lowercase().ends_with(".srt") {
             return raw_text.to_string();
         }
-        let ts_re = regex::Regex::new(
-            r"^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}",
-        )
-        .unwrap();
+        let ts_re =
+            regex::Regex::new(r"^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}")
+                .unwrap();
         let seq_re = regex::Regex::new(r"^\d{1,5}$").unwrap();
 
         let mut lines_out = Vec::new();
@@ -1511,7 +1509,9 @@ impl UniversalDocumentIngestor {
         let mode =
             DocumentIngestionMode::detect_from_filename_and_hint(source_name, used_optical_ocr);
         let normalized_payload = match mode {
-            DocumentIngestionMode::WordDocx => Self::extract_text_from_docx_xml_or_plain(raw_payload),
+            DocumentIngestionMode::WordDocx => {
+                Self::extract_text_from_docx_xml_or_plain(raw_payload)
+            }
             DocumentIngestionMode::PlainTextOrMarkdown => {
                 Self::normalize_srt_if_needed(source_name, raw_payload)
             }

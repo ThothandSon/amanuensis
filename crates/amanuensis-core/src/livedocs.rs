@@ -157,6 +157,7 @@ impl LiveCorpusEngine {
     /// Zero-configuration automatic bilingual alignment (`Original + Tradução Antiga`).
     /// Aligns paragraphs/sentences using structural position, shared numeric/date anchors,
     /// and character-length ratio heuristics — zero manual TMX aligner required.
+    #[allow(clippy::too_many_arguments)]
     pub fn ingest_bilingual_pair_zero_config(
         &mut self,
         doc_id: &str,
@@ -188,8 +189,7 @@ impl LiveCorpusEngine {
             if !tgt_paras.is_empty() {
                 let start_w = expected_tgt_idx.saturating_sub(1);
                 let end_w = (expected_tgt_idx + 1).min(tgt_paras.len() - 1);
-                for cand_idx in start_w..=end_w {
-                    let cand = &tgt_paras[cand_idx];
+                for (cand_idx, cand) in tgt_paras.iter().enumerate().take(end_w + 1).skip(start_w) {
                     let conf = Self::compute_bilingual_alignment_score(src_p, cand, idx, cand_idx);
                     if conf > best_conf {
                         best_conf = conf;
@@ -364,8 +364,7 @@ impl LiveCorpusEngine {
                         *flag = true;
                     }
 
-                    let suggested_target_phrase =
-                        self.subsegment_lexicon.get(&norm_ngram).cloned();
+                    let suggested_target_phrase = self.subsegment_lexicon.get(&norm_ngram).cloned();
                     let global_sim = Self::compute_global_word_jaccard_pct(
                         segment_source,
                         &hit_passage.source_paragraph,

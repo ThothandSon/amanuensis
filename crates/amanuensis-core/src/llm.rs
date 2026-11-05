@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 use crate::harness::CompiledSegmentHarness;
@@ -395,12 +396,17 @@ impl LocalLlmEngine {
                 enforced_glossary.push(format!("{} (Preservado)", term.source_term));
             } else {
                 enforced_glossary.push(format!("{} → {}", term.source_term, term.target_term));
-                if !draft.to_lowercase().contains(&term.target_term.to_lowercase()) {
+                if !draft
+                    .to_lowercase()
+                    .contains(&term.target_term.to_lowercase())
+                {
                     let re = regex::RegexBuilder::new(&regex::escape(&term.source_term))
                         .case_insensitive(!term.case_sensitive)
                         .build();
                     if let Ok(regex) = re {
-                        draft = regex.replace_all(&draft, term.target_term.as_str()).to_string();
+                        draft = regex
+                            .replace_all(&draft, term.target_term.as_str())
+                            .to_string();
                     }
                 }
             }
@@ -408,23 +414,24 @@ impl LocalLlmEngine {
 
         let mut applied_rules = Vec::new();
         for rule in &compiled_harness.applied_learned_rules {
-            if draft.to_lowercase().contains(&rule.pattern_from.to_lowercase()) {
+            if draft
+                .to_lowercase()
+                .contains(&rule.pattern_from.to_lowercase())
+            {
                 let re = regex::RegexBuilder::new(&regex::escape(&rule.pattern_from))
                     .case_insensitive(true)
                     .build();
                 if let Ok(regex) = re {
-                    draft = regex.replace_all(&draft, rule.preferred_to.as_str()).to_string();
+                    draft = regex
+                        .replace_all(&draft, rule.preferred_to.as_str())
+                        .to_string();
                     applied_rules.push(format!("{} → {}", rule.pattern_from, rule.preferred_to));
                 }
             }
         }
 
-        let audit = Self::audit_translation(
-            source_segment,
-            &draft,
-            enforced_glossary,
-            applied_rules,
-        );
+        let audit =
+            Self::audit_translation(source_segment, &draft, enforced_glossary, applied_rules);
 
         LocalTranslationOutput {
             model_id: active_model.id.clone(),

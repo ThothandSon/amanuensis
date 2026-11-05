@@ -84,7 +84,9 @@ impl AmanuensisWorkspace {
         let primary_bank = TmBank {
             id: "tm-primary".to_string(),
             name: "TM Principal do Projeto".to_string(),
-            description: "Banco de tradução principal atualizado automaticamente a cada segmento confirmado".to_string(),
+            description:
+                "Banco de tradução principal atualizado automaticamente a cada segmento confirmado"
+                    .to_string(),
             source_lang: "en-US".to_string(),
             target_lang: "pt-BR".to_string(),
             is_primary: true,
@@ -96,7 +98,9 @@ impl AmanuensisWorkspace {
         let aux_tech_bank = TmBank {
             id: "tm-aux-ai-corpus".to_string(),
             name: "Auxiliar: Corpus Engenharia de IA & NLP".to_string(),
-            description: "Banco de tradução auxiliar de referência para artigos de IA, LLMs locais e RAG".to_string(),
+            description:
+                "Banco de tradução auxiliar de referência para artigos de IA, LLMs locais e RAG"
+                    .to_string(),
             source_lang: "en-US".to_string(),
             target_lang: "pt-BR".to_string(),
             is_primary: false,
@@ -108,7 +112,8 @@ impl AmanuensisWorkspace {
         let aux_legal_bank = TmBank {
             id: "tm-aux-academic".to_string(),
             name: "Auxiliar: Normas Editoriais & ABNT/Markdown".to_string(),
-            description: "Padronização de notas de rodapé, cabeçalhos e tabelas acadêmicas".to_string(),
+            description: "Padronização de notas de rodapé, cabeçalhos e tabelas acadêmicas"
+                .to_string(),
             source_lang: "en-US".to_string(),
             target_lang: "pt-BR".to_string(),
             is_primary: false,
@@ -179,7 +184,8 @@ impl AmanuensisWorkspace {
             .map(|(idx, blk)| {
                 let (target_text, status) = if idx == 0 {
                     (
-                        "# Capítulo IV: Sobre a Tradução Automática Fundamentada Localmente".to_string(),
+                        "# Capítulo IV: Sobre a Tradução Automática Fundamentada Localmente"
+                            .to_string(),
                         SegmentStatus::Approved,
                     )
                 } else {
@@ -259,8 +265,7 @@ impl AmanuensisWorkspace {
         } else {
             None
         };
-        self.tm_engine
-            .search_hybrid(&seg.source_text, prev_ctx, 5)
+        self.tm_engine.search_hybrid(&seg.source_text, prev_ctx, 5)
     }
 
     /// Translates a segment using the local GGUF model constrained by the project's `AGENT.md`, `skills/*.md`,

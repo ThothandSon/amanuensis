@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::harness::GlossaryTerm;
 use crate::omegat_propagation::ContextualExceptionRecord;
@@ -117,7 +117,7 @@ impl AcrossConsistencyAndNotesEngine {
                 .push((idx, seg.source_text.trim().to_string()));
         }
 
-        for (_norm_src, occurrences) in &by_source {
+        for occurrences in by_source.values() {
             if occurrences.len() >= 2 {
                 let first_norm_tgt = normalize_text(&occurrences[0].1);
                 let has_divergence = occurrences
@@ -150,7 +150,7 @@ impl AcrossConsistencyAndNotesEngine {
             }
         }
 
-        for (_norm_tgt, occurrences) in &by_target {
+        for occurrences in by_target.values() {
             if occurrences.len() >= 2 {
                 let first_norm_src = normalize_text(&occurrences[0].1);
                 let has_distinct_sources = occurrences
@@ -301,13 +301,12 @@ impl AcrossConsistencyAndNotesEngine {
                     nt_counter += 1;
                     let fn_id = format!("[^nt-{}]", nt_counter);
                     text.push_str(&fn_id);
-                    let formatted_note = if pub_note.ends_with("[N. da T.]")
-                        || pub_note.ends_with("[N.T.]")
-                    {
-                        pub_note.to_string()
-                    } else {
-                        format!("{} [N. da T.]", pub_note)
-                    };
+                    let formatted_note =
+                        if pub_note.ends_with("[N. da T.]") || pub_note.ends_with("[N.T.]") {
+                            pub_note.to_string()
+                        } else {
+                            format!("{} [N. da T.]", pub_note)
+                        };
                     footnote_definitions.push(format!("{}: {}", fn_id, formatted_note));
                 }
             }

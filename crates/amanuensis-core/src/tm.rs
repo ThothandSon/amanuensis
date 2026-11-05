@@ -315,7 +315,8 @@ impl TranslationMemoryEngine {
             let (entry, blob, bank_weight) = row_res?;
             let cand_vec = deserialize_f32_vec(&blob);
             let semantic_sim = cosine_similarity(&query_vec, &cand_vec).max(0.0);
-            let lexical_sim = normalized_levenshtein(&query_lower, &entry.source_text.to_lowercase());
+            let lexical_sim =
+                normalized_levenshtein(&query_lower, &entry.source_text.to_lowercase());
             let context_match = match (context_prev, entry.context_prev.as_deref()) {
                 (Some(q_prev), Some(e_prev)) => q_prev.trim().eq_ignore_ascii_case(e_prev.trim()),
                 _ => false,
@@ -377,7 +378,10 @@ impl TranslationMemoryEngine {
                     (TmMatchType::Fuzzy, (c.lexical_sim * 100.0).round())
                 } else if c.semantic_sim >= 0.35 || sparse_ranks.contains_key(&c.entry.id) {
                     let blended = (c.lexical_sim * 0.55 + c.semantic_sim * 0.45) * 100.0;
-                    (TmMatchType::SemanticHybrid, blended.clamp(35.0, 94.0).round())
+                    (
+                        TmMatchType::SemanticHybrid,
+                        blended.clamp(35.0, 94.0).round(),
+                    )
                 } else {
                     return None;
                 };
@@ -426,7 +430,14 @@ impl TranslationMemoryEngine {
                 segs.push((lang, seg));
             }
             if segs.len() >= 2 {
-                self.add_entry(bank_id, &segs[0].1, &segs[1].1, None, None, Some("TMX Import"))?;
+                self.add_entry(
+                    bank_id,
+                    &segs[0].1,
+                    &segs[1].1,
+                    None,
+                    None,
+                    Some("TMX Import"),
+                )?;
                 imported += 1;
             }
         }
@@ -496,7 +507,10 @@ impl TranslationMemoryEngine {
             if parts.len() >= 2 {
                 let src = parts[0].trim().trim_matches('"');
                 let tgt = parts[1].trim().trim_matches('"');
-                let dom = parts.get(2).map(|d| d.trim().trim_matches('"')).or(Some("CSV Import"));
+                let dom = parts
+                    .get(2)
+                    .map(|d| d.trim().trim_matches('"'))
+                    .or(Some("CSV Import"));
                 if !src.is_empty() && !tgt.is_empty() {
                     self.add_entry(bank_id, src, tgt, None, None, dom)?;
                     imported += 1;

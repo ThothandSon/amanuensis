@@ -7,8 +7,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "lint": "tsc --noEmit",
+    "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings",
+    "format:check": "cargo fmt --all -- --check",
     "preview": "vite preview",
     "test:rust": "cargo test --workspace",
+    "ci": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && npm run lint && npm run build",
     "init:harness": "cargo run -p amanuensis-desktop -- --init-harness sample-project"
   },
   "dependencies": {

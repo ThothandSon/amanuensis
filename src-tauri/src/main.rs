@@ -182,7 +182,9 @@ fn handle_http_client(
     }
 
     let body = if let Some(end) = header_end_idx {
-        String::from_utf8_lossy(&data[end..]).trim_matches(char::from(0)).to_string()
+        String::from_utf8_lossy(&data[end..])
+            .trim_matches(char::from(0))
+            .to_string()
     } else {
         String::new()
     };
@@ -209,16 +211,20 @@ fn handle_http_client(
         ("POST", "/api/ocr") => serde_json::from_str::<OcrReq>(body)
             .map_err(|e| e.to_string())
             .and_then(|req| {
-                let mut cfg = OcrPipelineConfig::default();
-                cfg.dehyphenate_line_breaks = req.dehyphenate_line_breaks;
+                let cfg = OcrPipelineConfig {
+                    dehyphenate_line_breaks: req.dehyphenate_line_breaks,
+                    ..Default::default()
+                };
                 state.convert_scanned_pdf(req.document_name, req.raw_pages_ocr, cfg)
             })
             .and_then(|res| serde_json::to_string(&res).map_err(|e| e.to_string())),
         ("POST", "/api/ocr/pdf-upload") => serde_json::from_str::<PdfUploadReq>(body)
             .map_err(|e| e.to_string())
             .and_then(|req| {
-                let mut cfg = OcrPipelineConfig::default();
-                cfg.dehyphenate_line_breaks = req.dehyphenate_line_breaks;
+                let cfg = OcrPipelineConfig {
+                    dehyphenate_line_breaks: req.dehyphenate_line_breaks,
+                    ..Default::default()
+                };
                 let pdf_bytes = base64_decode(&req.pdf_base64);
                 state.convert_uploaded_pdf_bytes(req.document_name, &pdf_bytes, cfg)
             })

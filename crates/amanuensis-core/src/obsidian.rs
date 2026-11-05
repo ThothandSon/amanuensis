@@ -223,7 +223,10 @@ impl ObsidianVaultGenerator {
         }
 
         notes.push(ObsidianNoteFile {
-            relative_path: format!("00_MOC_e_Painel_da_Obra/🏛️ MOC - {}.md", config.project_name),
+            relative_path: format!(
+                "00_MOC_e_Painel_da_Obra/🏛️ MOC - {}.md",
+                config.project_name
+            ),
             category: "MOC".to_string(),
             content: moc_content,
         });
@@ -242,14 +245,16 @@ impl ObsidianVaultGenerator {
             commits = git_story.commits.len()
         );
         notes.push(ObsidianNoteFile {
-            relative_path: "00_MOC_e_Painel_da_Obra/📊 Painel de Evolucao e Metricas.md".to_string(),
+            relative_path: "00_MOC_e_Painel_da_Obra/📊 Painel de Evolucao e Metricas.md"
+                .to_string(),
             category: "MOC".to_string(),
             content: metrics_content,
         });
 
         // 4. 00_MOC_e_Painel_da_Obra/🕰️ Cronica da Traducao (Git Log).md
         notes.push(ObsidianNoteFile {
-            relative_path: "00_MOC_e_Painel_da_Obra/🕰️ Cronica da Traducao (Git Log).md".to_string(),
+            relative_path: "00_MOC_e_Painel_da_Obra/🕰️ Cronica da Traducao (Git Log).md"
+                .to_string(),
             category: "GitStory".to_string(),
             content: git_story.render_chronicle_markdown(),
         });
@@ -339,7 +344,10 @@ impl ObsidianVaultGenerator {
                 backlinks = if backlinks.is_empty() { "- [[Cap_01_Manuscrito]]".to_string() } else { backlinks }
             );
             notes.push(ObsidianNoteFile {
-                relative_path: format!("02_Atlas_Conceitual_e_Glossario/Conceitos/{}.md", entry.slug),
+                relative_path: format!(
+                    "02_Atlas_Conceitual_e_Glossario/Conceitos/{}.md",
+                    entry.slug
+                ),
                 category: "Conceito".to_string(),
                 content: concept_md,
             });
@@ -385,7 +393,7 @@ impl ObsidianVaultGenerator {
         notes.push(ObsidianNoteFile {
             relative_path: concept_canvas.relative_path.clone(),
             category: "Canvas".to_string(),
-            content: serde_json::to_string_pretty(& serde_json::json!({
+            content: serde_json::to_string_pretty(&serde_json::json!({
                 "nodes": concept_canvas.nodes,
                 "edges": concept_canvas.edges
             }))?,
@@ -394,7 +402,7 @@ impl ObsidianVaultGenerator {
         notes.push(ObsidianNoteFile {
             relative_path: genealogy_canvas.relative_path.clone(),
             category: "Canvas".to_string(),
-            content: serde_json::to_string_pretty(& serde_json::json!({
+            content: serde_json::to_string_pretty(&serde_json::json!({
                 "nodes": genealogy_canvas.nodes,
                 "edges": genealogy_canvas.edges
             }))?,
@@ -568,7 +576,10 @@ impl ObsidianVaultGenerator {
                     width: 340,
                     height: 150,
                     color: Some("1".to_string()),
-                    text: Some(format!("#### {} (v0 — Original)\n{}", seg.id, seg.source_text)),
+                    text: Some(format!(
+                        "#### {} (v0 — Original)\n{}",
+                        seg.id, seg.source_text
+                    )),
                     file: None,
                     label: None,
                 });
@@ -580,7 +591,10 @@ impl ObsidianVaultGenerator {
                     width: 340,
                     height: 150,
                     color: Some("4".to_string()),
-                    text: Some(format!("#### {} (v1 — Tradução)\n{}", seg.id, seg.target_text)),
+                    text: Some(format!(
+                        "#### {} (v1 — Tradução)\n{}",
+                        seg.id, seg.target_text
+                    )),
                     file: None,
                     label: None,
                 });
@@ -627,7 +641,9 @@ impl ObsidianVaultGenerator {
                         || trimmed.contains(':')
                 })
             } else {
-                errors.push("YAML Frontmatter não possui delimitador de fechamento '---'.".to_string());
+                errors.push(
+                    "YAML Frontmatter não possui delimitador de fechamento '---'.".to_string(),
+                );
                 false
             }
         } else {
@@ -719,9 +735,7 @@ impl ObsidianVaultGenerator {
                     if let Some((k, v)) = line.split_once(':') {
                         let key = k.trim();
                         let val = v.trim().trim_matches('"');
-                        if !key.is_empty()
-                            && !key.starts_with('-')
-                            && !standard_keys.contains(&key)
+                        if !key.is_empty() && !key.starts_with('-') && !standard_keys.contains(&key)
                         {
                             preserved_custom_yaml_keys.insert(key.to_string(), val.to_string());
                         }
@@ -759,8 +773,9 @@ impl ObsidianVaultGenerator {
                 let end_marker = format!("<!-- AMANUENSIS_TARGET_END:{} -->", seg_id);
                 if let Some(content_end_rel) = merged_markdown[content_start..].find(&end_marker) {
                     let content_end = content_start + content_end_rel;
-                    let current_obsidian_text =
-                        merged_markdown[content_start..content_end].trim().to_string();
+                    let current_obsidian_text = merged_markdown[content_start..content_end]
+                        .trim()
+                        .to_string();
 
                     if let Some(new_from_app) = amanuensis_segment_updates.get(&seg_id) {
                         let replacement = format!("\n{}\n", new_from_app.trim());

@@ -56,9 +56,7 @@ impl AppState {
 
     pub fn create_auxiliary_tm_bank(&self, bank: TmBank) -> Result<Vec<TmBank>, String> {
         let ws = self.workspace.lock().map_err(|e| e.to_string())?;
-        ws.tm_engine
-            .create_bank(&bank)
-            .map_err(|e| e.to_string())?;
+        ws.tm_engine.create_bank(&bank).map_err(|e| e.to_string())?;
         ws.tm_engine.list_banks().map_err(|e| e.to_string())
     }
 
@@ -113,9 +111,11 @@ impl AppState {
         granularity: ChunkGranularity,
         dehyphenate: bool,
     ) -> Result<OcrFormattingResult, String> {
-        let mut harness = OcrFormattingHarness::default();
-        harness.granularity = granularity;
-        harness.dehyphenate_line_breaks = dehyphenate;
+        let harness = OcrFormattingHarness {
+            granularity,
+            dehyphenate_line_breaks: dehyphenate,
+            ..Default::default()
+        };
         Ok(harness.format_and_segment(&raw_ocr))
     }
 
@@ -134,5 +134,39 @@ impl AppState {
         let mut ws = self.workspace.lock().map_err(|e| e.to_string())?;
         ws.onboarding_completed = false;
         ws.snapshot().map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_desktop_app_state_commands_and_snapshot() {
+        let state = AppState::new().expect("AppState should initialize");
+        let snap = state
+            .get_workbench_snapshot()
+            .expect("Snapshot should succeed");
+        assert!(!snap.segments.is_empty());
+
+        let tm_matches = state.query_segment_tm(0).expect("TM query should succeed");
+        assert!(!tm_matches.is_empty());
+
+        let local_out = state
+            .translate_segment_local(0)
+            .expect("Local translation should succeed");
+        assert!(!local_out.translated_text.is_empty());
+
+        let formatted = state
+            .format_ocr_with_harness(
+                "Cap-\nítulo I. Os comités de huelga em 1968.".to_string(),
+                ChunkGranularity::ContextualShort,
+                true,
+            )
+            .expect("OCR format should succeed");
+        assert!(!formatted.segments.is_empty());
+
+        let reset_snap = state.reset_onboarding().expect("Reset onboarding");
+        assert!(!reset_snap.onboarding_completed);
     }
 }
