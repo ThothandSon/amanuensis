@@ -1,12 +1,12 @@
 # 📜 Manual Completo e Guia Ilustrado — Amanuensis v2.0
 
-> **Estação de Tradução Assistida por IA Local (GGUF / `llama.cpp`), Memória de Tradução Híbrida (SQLite FTS5 + RRF), LiveCorpus LSC, Suíte OCR Nativa, Biblioteca Viva Obsidian + Git e Hardening de Segurança**
+> **Estação CAT Determinística Local-First, Memória de Tradução Híbrida (SQLite FTS5 + RRF), LiveCorpus LSC, Suíte OCR Nativa, Biblioteca Viva Obsidian + Git e Hardening de Segurança**
 
 ---
 
 ## 🏛️ 1. Arquitetura Geral do Sistema (v1 + v2 Completo)
 
-O **Amanuensis** foi desenhado para unir a precisão determinística dos sistemas CAT clássicos mais respeitados pela comunidade de tradutores (**MemoQ**, **Déjà Vu**, **OmegaT**, **SDL Trados**, **Wordfast** e **Across**) com a fluidez de modelos locais compactos (`TranslateGemma 4B`, `Qwen 2.5 3B`, `Llama 3.2`) governados por um **Harness Evolutivo de Projeto (`.amanuensis/AGENT.md`)** e execução **100% offline (Zero-Telemetry)**.
+O **Amanuensis** foi desenhado para unir a precisão determinística dos sistemas CAT clássicos mais respeitados pela comunidade de tradutores (**MemoQ**, **Déjà Vu**, **OmegaT**, **SDL Trados**, **Wordfast** e **Across**) com indexação híbrida SQLite (`FTS5` BM25 + Levenshtein + RRF), compiladores de documentos e um **Motor Evolutivo de Regras e Glossário (`.amanuensis/`)** em execução **100% offline (Zero-Telemetry)**.
 
 ```mermaid
 flowchart TD

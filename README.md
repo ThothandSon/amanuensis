@@ -1,8 +1,8 @@
-# ✒️ Amanuensis — Estação de Tradução Assistida por IA Local, Memórias Auxiliares Híbridas, Suíte OCR & Biblioteca Viva Obsidian + Git
+# ✒️ Amanuensis — Estação CAT Determinística, Memórias de Tradução Híbridas, Compiladores Multi-Formato, Suíte OCR & Biblioteca Viva Obsidian + Git
 
 > 📖 **Documentação Completa e Guia Ilustrado Passo a Passo:** [**`docs/MANUAL_COMPLETO_V2.md`**](docs/MANUAL_COMPLETO_V2.md) (com 18 prints em alta resolução de todas as telas, menus, gavetas e fluxos).
 
-**Amanuensis** é uma estação de tradução literária, acadêmica, técnica e editorial **100% Local-First (Zero-Telemetry)** construída em **Rust + macOS Cocoa/WKWebView/Vision + React 19 / TypeScript**. Ela combina a precisão determinística dos sistemas CAT mais respeitados pela comunidade de tradutores (**MemoQ**, **Déjà Vu**, **OmegaT**, **SDL Trados**, **Wordfast** e **Across**) com modelos locais compactos (`TranslateGemma 4B`, `Qwen 2.5 3B`, `Llama 3.2`) governados por um **Harness Evolutivo de Projeto (`.amanuensis/AGENT.md`)**.
+**Amanuensis** é uma estação de tradução literária, acadêmica, técnica e editorial **100% Local-First (Zero-Telemetry)** construída em **Rust + React 19 / TypeScript**. Ela combina a precisão determinística e algorítmica dos sistemas CAT mais respeitados pela comunidade de tradutores (**MemoQ**, **Déjà Vu**, **OmegaT**, **SDL Trados**, **Wordfast** e **Across**) com indexação híbrida SQLite (`FTS5` BM25 + Levenshtein + RRF), compiladores round-trip de documentos e um **Motor de Regras e Glossário Evolutivo de Projeto (`.amanuensis/`)**.
 
 ---
 
@@ -41,17 +41,17 @@
 
 | Módulo | Descrição |
 | :--- | :--- |
-| `tm.rs` | Memória de Tradução Híbrida SQLite em modo `WAL` + `mmap 256MB` (`FTS5` BM25 + `Levenshtein` + Vetor Denso via **Reciprocal Rank Fusion — RRF**), importação/exportação `.tmx` e `.csv` |
+| `tm.rs` | Memória de Tradução Híbrida SQLite em modo `WAL` + `mmap 256MB` (`FTS5` BM25 + `Levenshtein` + Concordância via **Reciprocal Rank Fusion — RRF**), importação/exportação `.tmx` e `.csv` |
 | `ocr.rs` | Suíte OCR para PDFs escaneados + `OcrFormattingHarness` (`OCR_FORMAT_HARNESS.md`) + `UniversalDocumentIngestor` (`.docx`, PDF digital nativo, `.srt`, `Cmd+V`) |
-| `harness.rs` | Cérebro contextual isolado em `.amanuensis/` (`AGENT.md`, `glossary.toml`, `skills/*.md`, `style_rules.toml`) com aprendizado contínuo de pós-edição humana |
-| `llm.rs` | Parser binário de modelos `GGUF` (`llama.cpp`), cálculo de diff palavra por palavra e auditoria determinística de números/glossário |
+| `harness.rs` | Motor de regras e glossário isolado em `.amanuensis/` (`glossary.toml`, `skills/*.md`, `style_rules.toml`) com evolução contínua a partir de revisões |
+| `llm.rs` | Motor de síntese guiada por glossário, cálculo de diff palavra por palavra e auditoria determinística de invariantes numéricas/terminológicas |
 | `obsidian.rs` & `git_story.rs` | Geração de Cofre Obsidian completo, grafos `.canvas` (JSON Canvas 1.0), commits semânticos Git, genealogia por trecho e round-trip byte-preserving com 3 gates |
 | `livedocs.rs` | `LiveCorpus` (`.amanuensis/corpus/`) zero-config e **Concordância de Substring Mais Longa (LSC)** para matches sub-frase mesmo abaixo de 50% de similaridade global |
 | `dejavu_assemble.rs` | Extrator de Léxico Recorrente da Obra (2–5 palavras), **AutoAssemble Híbrido** e **AutoWrite Dinâmico** ancorado |
 | `omegat_propagation.rs` | Auto-propagação instantânea de trechos repetidos, **Exceções Contextuais** por hash SHA-256 de vizinhança (`ctx-...`) e Busca/Substituição Regex Global |
-| `bilingual_review_epub_srt.rs` | Tabela Word `.docx` Bilíngue de Revisão Externa (Round-Trip com evolução do `AGENT.md`), Chain Files `.epub` sem tag-soup e Validador CPS de legendas `.srt`/`.vtt` |
+| `bilingual_review_epub_srt.rs` | Tabela Word `.docx` Bilíngue de Revisão Externa (Round-Trip com diff estruturado), Chain Files `.epub` sem tag-soup e Validador CPS de legendas `.srt`/`.vtt` |
 | `across_consistency_qa.rs` | Matriz de Consistência Intra-Obra, Estágios Editoriais Sem Lock-in e compilação de **Notas do Tradutor Publicáveis (`[N. da T.]`)** no rodapé sem vazar notas internas |
-| `security_perf.rs` | Compactação SQLite (`FTS5 optimize + VACUUM`), Symlinks Zero-Copy para modelos `.gguf`, Criptografia em Repouso (`HMAC-SHA256`), Escudo Anti-XXE/Zip-Bomb, Token Efêmero Loopback CSRF e Sandbox Anti-Prompt-Injection (`<source_segment_untrusted>`) |
+| `security_perf.rs` | Compactação SQLite (`FTS5 optimize + VACUUM`), Symlinks Zero-Copy para arquivos de projeto, Criptografia em Repouso (`HMAC-SHA256`), Escudo Anti-XXE/Zip-Bomb, Token Efêmero Loopback CSRF e Isolamento de Segmentos (`<source_segment_untrusted>`) |
 
 ---
 

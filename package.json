@@ -2,7 +2,7 @@
   "name": "amanuensis",
   "private": true,
   "version": "2.0.0",
-  "description": "Next-generation CAT Workbench with Auxiliary TMs, Scanned PDF to Searchable PDF/Markdown Suite, and Evolving Local LLM Project Harness",
+  "description": "Local-First Deterministic CAT Workbench with Hybrid SQLite TMs, Sub-Segment AutoAssemble, Document Compilers, OCR Suite, and Obsidian + Git Integration",
   "type": "module",
   "scripts": {
     "dev": "vite",
